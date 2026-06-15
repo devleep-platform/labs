@@ -15,8 +15,8 @@ REQUIRED_FIELDS = [
 VALID_DIFFICULTIES  = {"beginner", "intermediate", "advanced", "expert"}
 VALID_TERRAFORM     = {"labs/linux-ec2", "labs/docker-ec2", "labs/kubernetes-eks"}
 VALID_TRACKS        = {"linux", "docker", "kubernetes", "ansible", "git", "jenkins"}
-VALID_MODES         = {"guided", "incident", "challenge"}
-VALID_HINT_POLICIES = {"show_level_1_automatically", "manual_only"}
+VALID_MODES         = {"guided", "incident", "challenge", "break-fix"}
+VALID_HINT_POLICIES = {"show_level_1_automatically", "manual_only", "available_with_penalty"}
 VALID_CHECK_TYPES   = {"ssh", "output_matches", "http_get", "multi_check"}
 
 

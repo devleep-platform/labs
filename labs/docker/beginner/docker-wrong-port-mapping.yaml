@@ -86,6 +86,8 @@ hints:
 
         curl http://localhost:8080   # should return 200
 
+hint_policy: manual_only
+
 validation:
   strategy: all
   default_timeout_seconds: 10

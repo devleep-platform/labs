@@ -101,6 +101,8 @@ hints:
         docker ps
         docker logs api-app
 
+hint_policy: manual_only
+
 validation:
   strategy: all
   default_timeout_seconds: 10

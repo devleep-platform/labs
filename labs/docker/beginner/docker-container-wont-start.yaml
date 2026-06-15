@@ -90,6 +90,8 @@ hints:
 
       Or build a corrected image with a valid CMD.
 
+hint_policy: manual_only
+
 validation:
   strategy: all
   default_timeout_seconds: 10

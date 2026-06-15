@@ -91,6 +91,25 @@ hints:
           echo "UPTIME: $(docker ps --format '{{.Status}}')"
         } > /tmp/docker-baseline.txt
 
+  - level: 3
+    text: |
+      Complete commands for the orientation task:
+
+        docker ps                          # list running containers
+        docker inspect webserver           # full container config as JSON
+        docker logs webserver              # stdout/stderr from the app
+        docker port webserver              # host-to-container port mapping
+
+      Save the baseline:
+        {
+          echo "CONTAINER: $(docker ps --format '{{.Names}}')"
+          echo "IMAGE: $(docker ps --format '{{.Image}}')"
+          echo "PORTS: $(docker ps --format '{{.Ports}}')"
+          echo "UPTIME: $(docker ps --format '{{.Status}}')"
+        } > /tmp/docker-baseline.txt
+
+hint_policy: manual_only
+
 validation:
   strategy: all
   default_timeout_seconds: 5

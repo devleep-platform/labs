@@ -96,6 +96,8 @@ hints:
 
         curl http://localhost:8080   # should return "Devleep is live"
 
+hint_policy: manual_only
+
 validation:
   strategy: all
   default_timeout_seconds: 10
