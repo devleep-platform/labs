@@ -5,12 +5,20 @@ import sys
 from pathlib import Path
 
 import requests
-import yaml
+
+BOM = "﻿"
+
+
+def clean(value):
+    """Strip whitespace and BOM from an env var value."""
+    return value.strip().strip(BOM)
 
 
 def main():
-    api_url = os.environ.get("PLATFORM_API_URL", "").rstrip("/").strip()
-    secret = os.environ.get("LAB_SYNC_SECRET", "").strip()
+    api_url = clean(os.environ.get("PLATFORM_API_URL", "")).rstrip("/")
+    secret = clean(os.environ.get("LAB_SYNC_SECRET", ""))
+
+    print(f"DEBUG: secret_len={len(secret)} url_len={len(api_url)}")
 
     if not api_url:
         print("ERROR: PLATFORM_API_URL environment variable is not set")
@@ -21,7 +29,7 @@ def main():
 
     lab_files = sorted(Path("labs").rglob("*.yaml"))
     if not lab_files:
-        print("No lab YAML files found in labs/ — nothing to sync")
+        print("No lab YAML files found in labs/ -- nothing to sync")
         sys.exit(0)
 
     labs = []
@@ -42,7 +50,7 @@ def main():
         resp.raise_for_status()
         result = resp.json()
     except requests.HTTPError as e:
-        print(f"ERROR: HTTP {e.response.status_code} from platform API — {e.response.text}")
+        print(f"ERROR: HTTP {e.response.status_code} -- {e.response.text}")
         sys.exit(1)
     except Exception as e:
         print(f"ERROR: {e}")
