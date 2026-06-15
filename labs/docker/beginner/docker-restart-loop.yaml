@@ -1,0 +1,153 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  last_updated: 2026-06-15
+
+id: docker-restart-loop
+title: "Restart Loop"
+description: >
+  A web scraper container has been restarting every few seconds since the last
+  deploy. The on-call dashboard shows restart count climbing past 50. You need
+  to diagnose the root cause using docker inspect, understand what exit code 137
+  means, and fix the container so it stays running.
+
+track: docker
+module: docker-fundamentals
+sort_order: 70
+difficulty: beginner
+engineer_level: L1
+mode: incident
+
+tags:
+  - docker
+  - restart-loop
+  - oom
+  - exit-codes
+  - inspect
+  - memory
+
+estimated_minutes: 30
+timeout_minutes: 60
+
+terraform_module: labs/docker-ec2
+scenario_id: docker-restart-loop
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - log-investigation
+
+briefing:
+  severity: sev-2
+  impact: Web scraper offline -- data pipeline has been receiving no input for 30 minutes
+  title: web-scraper Container Restart Loop
+  narrative: |
+    The data team's Slack is on fire. The web-scraper container has restarted
+    over 50 times in the last 30 minutes and the pipeline is stalled.
+    The previous operator increased the restart policy to "always" last week
+    "to make it more resilient" and went on leave. No other changes were made.
+    You have SSH access to the host. Diagnose why it keeps dying and fix it.
+
+objectives:
+  - Use docker inspect to read the container's exit code and OOMKilled flag
+  - Understand what exit code 137 means in a container context
+  - Understand how restart policies interact with OOM kills
+  - Fix the container by providing adequate memory and confirm it stays running
+
+success_criteria:
+  - The web-scraper container is running and not restarting
+  - The container is running with at least 128 MB of memory
+  - docker inspect web-scraper shows OOMKilled false
+
+hints:
+  - level: 1
+    text: |
+      Start with the basics:
+
+        docker ps -a --filter name=web-scraper
+
+      The STATUS column shows "Restarting" or a short uptime with a high restart count.
+      docker logs only tells you what the app printed before it died.
+      To understand WHY it died, use inspect:
+
+        docker inspect web-scraper --format '{{.State.ExitCode}} {{.State.OOMKilled}} {{.RestartCount}}'
+
+  - level: 2
+    text: |
+      Exit code 137 means the container was sent SIGKILL (128 + 9).
+      When OOMKilled is true, the kernel killed the process because it exceeded
+      its memory limit -- not because the app crashed.
+
+      Check what memory limit is set:
+
+        docker inspect web-scraper --format '{{.HostConfig.Memory}}'
+
+      A value like 16777216 means 16 MB -- far too low for a web scraper.
+      Stop, remove, and re-run with a proper limit:
+
+        docker stop web-scraper && docker rm web-scraper
+        docker run -d \
+          --name web-scraper \
+          --restart unless-stopped \
+          --memory 256m \
+          web-scraper:latest
+
+  - level: 3
+    text: |
+      Full fix:
+
+        docker stop web-scraper && docker rm web-scraper
+        docker run -d \
+          --name web-scraper \
+          --restart unless-stopped \
+          --memory 256m \
+          --memory-swap 256m \
+          web-scraper:latest
+
+      Verify it stays alive:
+
+        sleep 10 && docker inspect web-scraper \
+          --format 'Running={{.State.Running}} OOMKilled={{.State.OOMKilled}} Restarts={{.RestartCount}}'
+
+      You should see Running=true OOMKilled=false and a low restart count.
+
+hint_policy: manual_only
+
+validation:
+  strategy: all
+  default_timeout_seconds: 15
+  checks:
+    - id: container-running
+      name: web-scraper Is Running
+      type: ssh
+      cmd: docker ps --filter "name=web-scraper" --filter "status=running" | grep -q web-scraper
+      failure_hint: The container must be named web-scraper and in running status
+
+    - id: memory-limit-set
+      name: Memory Limit Is at Least 128 MB
+      type: ssh
+      cmd: |
+        MEM=$(docker inspect web-scraper --format '{{.HostConfig.Memory}}')
+        [ "$MEM" -ge 134217728 ]
+      failure_hint: Run the container with --memory 256m or higher
+
+    - id: not-oom-killed
+      name: Container Is Not OOM Killed
+      type: ssh
+      cmd: |
+        OOM=$(docker inspect web-scraper --format '{{.State.OOMKilled}}')
+        [ "$OOM" = "false" ]
+      failure_hint: The container is still being OOM killed -- increase the memory limit
+
+completion_message: |
+  Exit code 137 (128+SIGKILL) from the kernel OOM killer is one of the most
+  common causes of mysterious restart loops in production. The app log shows
+  nothing because the process never got a chance to write a final message --
+  the kernel just killed it. Always set --memory limits on production containers,
+  and always check OOMKilled in docker inspect before blaming the application.
