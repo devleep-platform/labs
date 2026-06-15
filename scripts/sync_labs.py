@@ -26,7 +26,7 @@ def main():
 
     labs = []
     for path in lab_files:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             content = f.read()
         labs.append({"filename": str(path), "content": content})
 

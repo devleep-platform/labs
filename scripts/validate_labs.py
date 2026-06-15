@@ -23,7 +23,7 @@ VALID_CHECK_TYPES   = {"ssh", "output_matches", "http_get", "multi_check"}
 def validate_file(path: Path) -> list:
     errors = []
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             lab = yaml.safe_load(f)
     except yaml.YAMLError as e:
         return [f"YAML parse error: {e}"]
