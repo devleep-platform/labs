@@ -21,7 +21,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install pyyaml
+        run: pip install pyyaml requests
 
       - name: Validate all labs before sync
         run: python scripts/validate_labs.py
