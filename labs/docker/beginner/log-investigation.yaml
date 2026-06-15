@@ -1,0 +1,145 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  last_updated: 2026-06-15
+
+id: log-investigation
+title: "Log Investigation"
+description: >
+  A containerised order-processing API is restarting every 30 seconds and
+  the on-call engineer left no notes. You have SSH access to the host.
+  Use docker logs to diagnose why the container keeps crashing and bring
+  the service back online.
+
+track: docker
+module: docker-fundamentals
+sort_order: 60
+difficulty: beginner
+engineer_level: L1
+mode: incident
+
+tags:
+  - docker
+  - logs
+  - debugging
+  - crash-loop
+  - incident-response
+
+estimated_minutes: 30
+timeout_minutes: 60
+
+terraform_module: labs/docker-ec2
+scenario_id: docker-log-investigation
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - missing-env-vars
+
+briefing:
+  severity: sev-2
+  impact: Order API unavailable — all order submissions failing with 503
+  title: Order API in Crash Loop
+  narrative: |
+    PagerDuty fired at 02:14. The order-api container has been restarting
+    continuously for the past 20 minutes. Users cannot place orders.
+    The previous deploy engineer went home and left no runbook.
+    You have SSH to the host. Diagnose the crash from the logs and fix it.
+
+objectives:
+  - Use docker ps -a to identify a crash-looping container
+  - Use docker logs to read the container's error output
+  - Identify the root cause from the log output
+  - Fix the configuration and confirm the container stays running
+
+success_criteria:
+  - The order-api container is running and not in a restart loop
+  - GET http://localhost:8080/health returns HTTP 200
+  - docker logs order-api contains no FATAL lines in the last 10 lines
+
+hints:
+  - level: 1
+    text: |
+      Start by seeing what the container is actually doing:
+
+        docker ps -a --filter name=order-api
+
+      Notice the STATUS column — "Restarting" means it starts, crashes, starts again.
+      Read the README for context:
+
+        cat /home/student/README.txt
+
+  - level: 2
+    text: |
+      Read the logs from the last crash:
+
+        docker logs order-api --tail 50
+
+      Look for lines that start with FATAL or Error.
+      The container expects a required environment variable.
+      Find which one is missing, then recreate the container with it:
+
+        docker stop order-api && docker rm order-api
+        docker run -d \
+          --name order-api \
+          --restart unless-stopped \
+          -p 8080:3000 \
+          -e <VAR_NAME>=<value> \
+          order-api:latest
+
+  - level: 3
+    text: |
+      The logs show:
+
+        FATAL: Required environment variable DB_HOST is not set. Exiting.
+
+      Recreate the container with the correct env var:
+
+        docker stop order-api && docker rm order-api
+        docker run -d \
+          --name order-api \
+          --restart unless-stopped \
+          -p 8080:3000 \
+          -e DB_HOST=db.internal \
+          order-api:latest
+
+      Confirm it stays up:
+
+        docker ps --filter name=order-api
+        curl http://localhost:8080/health
+
+validation:
+  strategy: all
+  default_timeout_seconds: 10
+  checks:
+    - id: container-running
+      name: order-api Container Is Running
+      type: ssh
+      cmd: docker ps --filter "name=order-api" --filter "status=running" | grep -q order-api
+      failure_hint: The container must be named order-api and in running status — not restarting
+
+    - id: health-endpoint
+      name: Health Endpoint Returns 200
+      type: ssh
+      cmd: curl -sf -o /dev/null -w "%{http_code}" http://localhost:8080/health | grep -q "200"
+      failure_hint: GET /health must return 200 — check the port mapping and that DB_HOST is set
+
+    - id: no-fatal-in-recent-logs
+      name: No FATAL Errors in Recent Logs
+      type: ssh
+      cmd: "! docker logs order-api --tail 10 2>&1 | grep -q FATAL"
+      failure_hint: Recent logs still contain FATAL — the container may be set up with the wrong env var value
+
+hint_policy: show_level_1_automatically
+
+completion_message: |
+  docker logs is your first tool in any container incident. A crash loop almost
+  always leaves a clear error in the last few log lines — you just have to know
+  where to look. In production, ship your container logs to a centralised store
+  (CloudWatch, Datadog, Loki) so you can read them even after the container is gone.
