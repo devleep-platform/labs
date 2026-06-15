@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'labs/**/*.yaml'
+      - 'scripts/*.py'
+  workflow_dispatch:
 
 jobs:
   validate:
