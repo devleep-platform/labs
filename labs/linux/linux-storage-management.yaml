@@ -1,0 +1,217 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-storage-management
+title: "Storage Management: Partition, Format, Mount, and Persist"
+description: >
+  A new EBS volume has been attached to the instance.
+  Partition it, format it, mount it at /data, and make
+  the mount survive a reboot via /etc/fstab.
+
+track: linux
+module: linux-administration
+sort_order: 80
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - storage
+  - disk
+  - fdisk
+  - mkfs
+  - mount
+  - fstab
+  - administration
+
+estimated_minutes: 45
+timeout_minutes: 90
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+    - ebs
+
+prerequisites:
+  - linux-server-orientation
+
+briefing:
+  severity: sev-4
+  impact: No production impact — administration task
+  title: New Volume Provisioning
+  narrative: |
+    The application team needs a dedicated disk for database storage.
+    A new EBS volume has been attached to the instance as /dev/xvdb.
+    It shows up in lsblk but has no partition table, no filesystem, and is not mounted.
+    Your job: make it usable, mount it at /data, and ensure it remounts automatically
+    after every reboot — without accidentally overwriting the root disk.
+
+evidence:
+  - type: note
+    title: "Storage ticket INFRA-089"
+    content: |
+      New volume: /dev/xvdb (or /dev/nvme1n1 — check lsblk)
+      Mount point: /data
+      Filesystem: ext4
+      Owner: ubuntu:ubuntu
+      Must persist: yes, add to /etc/fstab using UUID
+
+objectives:
+  - Use lsblk and fdisk -l to identify the unformatted volume without guessing
+  - Create a partition, format it ext4, and mount it
+  - Use blkid to get the UUID and write a correct /etc/fstab entry
+  - Verify the mount survives umount + mount -a before trusting it to reboot
+
+deliverables:
+  - path: /tmp/storage-audit.txt
+    description: |
+      Audit report containing:
+        - lsblk output showing /data mounted
+        - blkid output showing UUID of the new partition
+        - /etc/fstab entry for the new volume
+        - df -h output confirming /data is mounted and accessible
+
+success_criteria:
+  - New partition created on the secondary disk
+  - ext4 filesystem formatted on the partition
+  - Volume mounted at /data
+  - /etc/fstab entry uses UUID (not device path)
+  - /tmp/storage-audit.txt documents all steps
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      Always identify the disk before touching it.
+        lsblk                 — shows block devices as a tree
+        fdisk -l              — shows partition tables and sizes
+        df -h                 — shows what is already mounted
+
+      The workflow is always: partition → format → mount → persist.
+      Never skip the UUID step: device names (/dev/xvdb) can change after reboot.
+      Always test the fstab entry with mount -a before rebooting.
+
+  - level: 2
+    text: |
+      Identify the disk (usually /dev/xvdb or /dev/nvme1n1):
+        lsblk
+        sudo fdisk -l | grep -E "^Disk|^/dev"
+
+      Partition (interactive fdisk):
+        sudo fdisk /dev/xvdb
+        # inside fdisk: n → p → 1 → Enter → Enter → w
+
+      Format:
+        sudo mkfs.ext4 /dev/xvdb1
+
+      Mount:
+        sudo mkdir -p /data
+        sudo mount /dev/xvdb1 /data
+        sudo chown ubuntu:ubuntu /data
+
+      Get UUID and add to fstab:
+        sudo blkid /dev/xvdb1           # copy the UUID value
+        echo "UUID=<paste-uuid>  /data  ext4  defaults  0  2" | sudo tee -a /etc/fstab
+        sudo mount -a                   # test fstab without rebooting — must succeed
+
+  - level: 3
+    text: |
+      Full sequence (replace xvdb with your actual device name):
+
+        # Step 1: identify without guessing
+        lsblk
+        sudo fdisk -l
+        # Root disk is the one with partitions and a boot flag
+        # The new one has no partition table
+
+        # Step 2: partition (non-interactive alternative)
+        echo -e "n\np\n1\n\n\nw" | sudo fdisk /dev/xvdb
+        lsblk                           # verify xvdb1 appeared
+
+        # Step 3: format
+        sudo mkfs.ext4 /dev/xvdb1
+
+        # Step 4: mount
+        sudo mkdir -p /data
+        sudo mount /dev/xvdb1 /data
+        df -h /data                     # verify it's mounted
+
+        # Step 5: set ownership
+        sudo chown ubuntu:ubuntu /data
+        touch /data/test-file           # verify write access
+
+        # Step 6: persist with UUID (device names can change on reboot)
+        UUID=$(sudo blkid -s UUID -o value /dev/xvdb1)
+        echo "UUID=$UUID  /data  ext4  defaults  0  2" | sudo tee -a /etc/fstab
+        tail -3 /etc/fstab              # verify the entry
+
+        # Step 7: test fstab before rebooting
+        sudo umount /data
+        sudo mount -a                   # re-mounts everything in fstab
+        df -h /data                     # must be mounted again
+
+        # Audit
+        {
+          echo "=== BLOCK DEVICES ==="
+          lsblk
+          echo "=== UUID ==="
+          sudo blkid /dev/xvdb1
+          echo "=== FSTAB ENTRY ==="
+          grep "$UUID" /etc/fstab
+          echo "=== DISK USAGE ==="
+          df -h /data
+        } > /tmp/storage-audit.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: partition-exists
+      name: Partition Created
+      type: ssh
+      cmd: lsblk -no TYPE /dev/xvdb1 2>/dev/null | grep -q "part" || lsblk -no TYPE /dev/nvme1n1p1 2>/dev/null | grep -q "part"
+      failure_hint: "Run: echo -e 'n\\np\\n1\\n\\n\\nw' | sudo fdisk /dev/xvdb"
+
+    - id: data-mounted
+      name: /data Mounted
+      type: ssh
+      cmd: df /data 2>/dev/null | grep -q "/data"
+      failure_hint: "Run: sudo mkdir -p /data && sudo mount /dev/xvdb1 /data"
+
+    - id: fstab-uses-uuid
+      name: fstab Entry Uses UUID
+      type: ssh
+      cmd: grep "/data" /etc/fstab 2>/dev/null | grep -q "UUID="
+      failure_hint: "Use blkid to get UUID then add UUID=... /data ext4 defaults 0 2 to /etc/fstab"
+
+    - id: fstab-mounts-cleanly
+      name: fstab Mounts Without Error
+      type: ssh
+      cmd: sudo mount -a 2>/dev/null && df /data 2>/dev/null | grep -q /data
+      failure_hint: "Run: sudo mount -a — fix any errors before proceeding"
+
+    - id: audit-written
+      name: Storage Audit Written
+      type: ssh
+      cmd: test -s /tmp/storage-audit.txt
+      failure_hint: "Write lsblk, blkid, fstab entry, and df -h output to /tmp/storage-audit.txt"
+
+completion_message: |
+  Always use UUID in /etc/fstab, never device paths like /dev/xvdb.
+  AWS can reorder EBS volumes on reboot — xvdb becomes xvdc and your fstab
+  either mounts the wrong disk or fails to boot entirely. UUID is stable.
+  Always test fstab with mount -a before rebooting. A bad fstab entry
+  on a remote server requires console access to fix.

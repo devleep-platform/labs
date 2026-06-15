@@ -1,0 +1,252 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-bash-foundation
+title: "Bash Scripting: Variables, Control Flow, and Functions"
+description: >
+  Write a system health check script from scratch.
+  Cover variables, arithmetic, conditionals, loops, arrays, and functions —
+  the constructs every production script is built from.
+
+track: linux
+module: shell-scripting
+sort_order: 90
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - bash
+  - scripting
+  - functions
+  - loops
+  - variables
+  - shell-scripting
+
+estimated_minutes: 55
+timeout_minutes: 110
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-text-processing
+  - linux-process-control
+
+briefing:
+  severity: sev-4
+  impact: No production impact — skill lab
+  title: Health Check Script Required
+  narrative: |
+    Every infrastructure team eventually maintains bash scripts.
+    The question is whether those scripts are written by someone who
+    understands the language or by someone who cargo-culted them from Stack Overflow.
+    The difference shows up when the script runs at 3 AM and fails in an unexpected way.
+    This lab builds the foundation: write a real health check script step by step.
+
+evidence:
+  - type: note
+    title: What you will build
+    content: |
+      /usr/local/bin/health-check.sh — a reusable health check script that:
+        - Accepts a threshold argument
+        - Checks CPU load, memory, and disk
+        - Uses functions, arrays, and conditional logic
+        - Outputs structured, colored status lines
+        - Exits with a non-zero code if any threshold is breached
+
+objectives:
+  - Declare and use variables, including arrays and associative arrays
+  - Write conditionals (if/elif/else) and loops (for, while) correctly
+  - Define reusable functions with local variables and return codes
+  - Build a script that accepts arguments and uses them in logic
+
+deliverables:
+  - path: /usr/local/bin/health-check.sh
+    description: |
+      Health check script that:
+        - Accepts optional threshold arg (default 80)
+        - Checks disk usage on / — WARN if above threshold
+        - Checks memory — WARN if available < 200MB
+        - Checks CPU load average — WARN if above nproc
+        - Prints PASS/WARN for each check
+        - Exits 0 if all pass, 1 if any warn
+  - path: /tmp/health-report.txt
+    description: Output of running health-check.sh, showing at least 3 check results
+
+success_criteria:
+  - /usr/local/bin/health-check.sh exists and is executable
+  - Script uses at least one function definition
+  - Script accepts a threshold argument ($1)
+  - Running the script produces /tmp/health-report.txt with 3+ lines
+  - Script exits with code 0 (all pass) or 1 (any warn)
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      Start with the shebang and set strict mode on line 1:
+        #!/bin/bash
+        set -euo pipefail
+
+      Functions:
+        check_disk() {
+          local threshold="${1:-80}"
+          ...
+        }
+
+      Variables: UPPER_CASE for globals, lower_case for locals.
+      Arithmetic: $(( expression )) or use bc for decimals.
+      Conditionals: [ "$var" -gt 80 ] for integers, [[ "$str" == "ok" ]] for strings.
+      Reading command output into a variable: VAR=$(command)
+
+  - level: 2
+    text: |
+      Script skeleton:
+
+        #!/bin/bash
+        set -euo pipefail
+        THRESHOLD="${1:-80}"
+        WARNINGS=0
+
+        check_disk() {
+          local used
+          used=$(df / | awk 'NR==2{gsub("%","",$5);print $5}')
+          if [ "$used" -ge "$THRESHOLD" ]; then
+            echo "WARN: disk / is ${used}% used (threshold: ${THRESHOLD}%)"
+            return 1
+          fi
+          echo "PASS: disk / is ${used}% used"
+          return 0
+        }
+
+        check_memory() {
+          local avail_mb
+          avail_mb=$(free -m | awk 'NR==2{print $7}')
+          if [ "$avail_mb" -lt 200 ]; then
+            echo "WARN: only ${avail_mb}MB memory available"
+            return 1
+          fi
+          echo "PASS: ${avail_mb}MB memory available"
+          return 0
+        }
+
+        check_disk   || (( WARNINGS++ )) || true
+        check_memory || (( WARNINGS++ )) || true
+        [ "$WARNINGS" -gt 0 ] && exit 1 || exit 0
+
+      Make executable and run:
+        sudo chmod +x /usr/local/bin/health-check.sh
+        /usr/local/bin/health-check.sh 75 | tee /tmp/health-report.txt
+        echo "Exit code: $?"
+
+  - level: 3
+    text: |
+      Complete script:
+
+        sudo tee /usr/local/bin/health-check.sh << 'SCRIPT'
+        #!/bin/bash
+        set -euo pipefail
+
+        THRESHOLD="${1:-80}"
+        WARNINGS=0
+        RED='\033[0;31m'
+        GREEN='\033[0;32m'
+        NC='\033[0m'
+
+        pass() { echo -e "${GREEN}PASS${NC}: $*"; }
+        warn() { echo -e "${RED}WARN${NC}: $*"; (( WARNINGS++ )) || true; }
+
+        check_disk() {
+          local used
+          used=$(df / | awk 'NR==2{gsub("%","",$5);print $5}')
+          [ "$used" -ge "$THRESHOLD" ] \
+            && warn "disk / is ${used}% used (threshold: ${THRESHOLD}%)" \
+            || pass "disk / is ${used}% used"
+        }
+
+        check_memory() {
+          local avail_mb
+          avail_mb=$(free -m | awk 'NR==2{print $7}')
+          [ "$avail_mb" -lt 200 ] \
+            && warn "only ${avail_mb}MB memory available" \
+            || pass "${avail_mb}MB memory available"
+        }
+
+        check_load() {
+          local load cpus
+          load=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+          cpus=$(nproc)
+          local load_int="${load%.*}"
+          [ "${load_int:-0}" -ge "$cpus" ] \
+            && warn "load average ${load} >= CPU count ${cpus}" \
+            || pass "load average ${load} (${cpus} CPUs)"
+        }
+
+        echo "=== Health Check $(date) — threshold: ${THRESHOLD}% ==="
+        check_disk
+        check_memory
+        check_load
+        echo "=== ${WARNINGS} warning(s) ==="
+        exit "$WARNINGS"
+        SCRIPT
+
+        sudo chmod +x /usr/local/bin/health-check.sh
+        /usr/local/bin/health-check.sh 95 | tee /tmp/health-report.txt
+        echo "Exit code: $?"
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: script-exists-executable
+      name: Script Exists and Is Executable
+      type: ssh
+      cmd: test -x /usr/local/bin/health-check.sh
+      failure_hint: "Create /usr/local/bin/health-check.sh and chmod +x it"
+
+    - id: script-has-function
+      name: Script Defines a Function
+      type: ssh
+      cmd: grep -qE '^\w+\(\)' /usr/local/bin/health-check.sh 2>/dev/null
+      failure_hint: "Define at least one function in your script: check_disk() { ... }"
+
+    - id: script-accepts-arg
+      name: Script Uses Threshold Argument
+      type: ssh
+      cmd: grep -qE '\$1|:-' /usr/local/bin/health-check.sh 2>/dev/null
+      failure_hint: 'Use ${1:-80} to accept an optional threshold argument'
+
+    - id: report-written
+      name: Health Report Written
+      type: ssh
+      cmd: test -s /tmp/health-report.txt && test $(wc -l < /tmp/health-report.txt) -ge 3
+      failure_hint: "Run: /usr/local/bin/health-check.sh | tee /tmp/health-report.txt"
+
+    - id: script-produces-exit-code
+      name: Script Exits with Meaningful Code
+      type: ssh
+      cmd: /usr/local/bin/health-check.sh 99 > /dev/null 2>&1; EC=$?; test $EC -eq 0 || test $EC -eq 1
+      failure_hint: "End your script with exit 0 (all pass) or exit 1 (any warnings)"
+
+completion_message: |
+  set -euo pipefail on line 2 of every bash script. No exceptions.
+  -e exits on error, -u treats unset variables as errors, -o pipefail catches
+  failures in pipelines. Without these, a script can silently continue past a
+  failed command and corrupt data or skip steps without any indication.
+  Local variables in functions prevent the most common bash bug: a function
+  accidentally overwriting a caller's variable.

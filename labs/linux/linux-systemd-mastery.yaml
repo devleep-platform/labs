@@ -1,0 +1,258 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-systemd-mastery
+title: "systemd: Write, Deploy, and Harden a Production Service Unit"
+description: >
+  Deploy a custom application as a properly hardened systemd service.
+  Write the unit file, configure restart behavior, set resource limits,
+  and verify the service survives a reboot.
+
+track: linux
+module: linux-administration
+sort_order: 70
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - systemd
+  - journalctl
+  - unit-files
+  - services
+  - administration
+
+estimated_minutes: 50
+timeout_minutes: 100
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-users-and-access
+
+briefing:
+  severity: sev-4
+  impact: No production impact — administration task
+  title: Application Deployment Task
+  narrative: |
+    A development team has built a Python HTTP service that currently runs
+    inside a tmux session. It dies if the server reboots or the session
+    disconnects. Your job: deploy it properly as a systemd service with
+    automatic restart, correct user isolation, and resource limits.
+    Then prove it survives a process kill and write the runbook entry.
+
+evidence:
+  - type: note
+    title: "App details"
+    content: |
+      Binary: /usr/local/bin/myapp (simple HTTP server, already present)
+      Port: 8080
+      Run as: myapp user (needs creating)
+      Requirements: auto-restart on crash, start at boot,
+                    log to journald, max 512MB RAM
+
+objectives:
+  - Write a complete systemd unit file with correct [Unit], [Service], [Install] sections
+  - Configure automatic restart with RestartSec and failure tracking
+  - Apply security hardening directives (NoNewPrivileges, PrivateTmp, etc.)
+  - Enable the service and prove it restarts automatically after a kill
+
+deliverables:
+  - path: /etc/systemd/system/myapp.service
+    description: |
+      Complete unit file with:
+        [Unit] Description, After=network.target
+        [Service] ExecStart, User, Restart=always, RestartSec
+        [Install] WantedBy=multi-user.target
+  - path: /tmp/service-audit.txt
+    description: |
+      Service audit containing:
+        - systemctl status myapp output
+        - Last 10 journal lines
+        - Proof service restarted after kill (PID changed)
+
+success_criteria:
+  - /etc/systemd/system/myapp.service exists with correct sections
+  - myapp service is active and enabled
+  - Service restarts automatically after SIGKILL
+  - /tmp/service-audit.txt documents the behavior
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      A systemd unit file has three sections:
+        [Unit]    — metadata and ordering (After=, Requires=)
+        [Service] — how to run the process (ExecStart=, User=, Restart=)
+        [Install] — when to enable (WantedBy=multi-user.target for most daemons)
+
+      After writing the file:
+        sudo systemctl daemon-reload     # always after editing a unit file
+        sudo systemctl enable myapp      # create symlink for boot start
+        sudo systemctl start myapp       # start now
+
+      Test restart: kill the process with SIGKILL, then check if it came back.
+      journalctl -u myapp -n 20 shows all log output from the service.
+
+  - level: 2
+    text: |
+      Create the service user:
+        sudo useradd -r -s /bin/false myapp    # system account, no login
+
+      Write the unit file:
+        sudo tee /etc/systemd/system/myapp.service << 'EOF'
+        [Unit]
+        Description=MyApp HTTP Service
+        After=network.target
+
+        [Service]
+        ExecStart=/usr/local/bin/myapp
+        User=myapp
+        Restart=always
+        RestartSec=5
+        MemoryLimit=512M
+        NoNewPrivileges=true
+        PrivateTmp=true
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+      Enable and start:
+        sudo systemctl daemon-reload
+        sudo systemctl enable myapp
+        sudo systemctl start myapp
+        systemctl status myapp
+
+      Test auto-restart:
+        PID1=$(systemctl show -p MainPID --value myapp)
+        sudo kill -9 $PID1
+        sleep 6
+        PID2=$(systemctl show -p MainPID --value myapp)
+        echo "Before: $PID1 — After: $PID2"   # must differ
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        # Service user (system account: -r = no home, -s /bin/false = no shell)
+        sudo useradd -r -s /bin/false myapp
+
+        # Create a dummy app if /usr/local/bin/myapp doesn't exist
+        sudo tee /usr/local/bin/myapp << 'EOF'
+        #!/bin/bash
+        while true; do echo "myapp running"; sleep 10; done
+        EOF
+        sudo chmod +x /usr/local/bin/myapp
+
+        # Write the unit file
+        sudo tee /etc/systemd/system/myapp.service << 'EOF'
+        [Unit]
+        Description=MyApp HTTP Service
+        Documentation=https://internal.wiki/myapp
+        After=network.target
+
+        [Service]
+        ExecStart=/usr/local/bin/myapp
+        User=myapp
+        Group=myapp
+        Restart=always
+        RestartSec=5
+        StartLimitIntervalSec=60
+        StartLimitBurst=3
+        MemoryLimit=512M
+        NoNewPrivileges=true
+        PrivateTmp=true
+        ProtectSystem=strict
+        ReadWritePaths=/var/log /tmp
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+        sudo systemctl daemon-reload
+        sudo systemctl enable myapp
+        sudo systemctl start myapp
+        systemctl status myapp              # must show active (running)
+
+        # Prove auto-restart
+        PID1=$(systemctl show -p MainPID --value myapp)
+        sudo kill -9 "$PID1"
+        sleep 6
+        PID2=$(systemctl show -p MainPID --value myapp)
+        systemctl status myapp             # should show active, restart count +1
+
+        # Audit
+        {
+          echo "=== SERVICE STATUS ==="
+          systemctl status myapp
+          echo ""
+          echo "=== LAST 10 LOG LINES ==="
+          journalctl -u myapp -n 10 --no-pager
+          echo ""
+          echo "=== RESTART PROOF ==="
+          echo "PID before kill: $PID1"
+          echo "PID after restart: $PID2"
+        } > /tmp/service-audit.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: unit-file-exists
+      name: Unit File Written
+      type: ssh
+      cmd: grep -q "WantedBy=multi-user.target" /etc/systemd/system/myapp.service 2>/dev/null
+      failure_hint: Write /etc/systemd/system/myapp.service with [Unit], [Service], [Install] sections
+
+    - id: service-active
+      name: myapp Service Active
+      type: ssh
+      cmd: systemctl is-active myapp 2>/dev/null
+      failure_hint: "Run: sudo systemctl daemon-reload && sudo systemctl start myapp"
+
+    - id: service-enabled
+      name: myapp Service Enabled at Boot
+      type: ssh
+      cmd: systemctl is-enabled myapp 2>/dev/null
+      failure_hint: "Run: sudo systemctl enable myapp"
+
+    - id: service-restarts-after-kill
+      name: Service Restarts After SIGKILL
+      type: ssh
+      cmd: |
+        PID1=$(systemctl show -p MainPID --value myapp 2>/dev/null)
+        [ -z "$PID1" ] || [ "$PID1" = "0" ] && exit 1
+        sudo kill -9 "$PID1"
+        sleep 6
+        PID2=$(systemctl show -p MainPID --value myapp 2>/dev/null)
+        [ "$PID1" != "$PID2" ] && [ "$PID2" != "0" ]
+      failure_hint: "Check Restart=always and RestartSec= in your unit file"
+
+    - id: audit-written
+      name: Service Audit Written
+      type: ssh
+      cmd: test -s /tmp/service-audit.txt && test $(wc -l < /tmp/service-audit.txt) -ge 8
+      failure_hint: "Write systemctl status and journalctl output to /tmp/service-audit.txt"
+
+completion_message: |
+  A process running in tmux dies when the SSH session drops.
+  A systemd service survives reboots, restarts after crashes, logs to journald,
+  and runs as a non-privileged user with resource limits.
+  The hardening directives (NoNewPrivileges, PrivateTmp, ProtectSystem) are
+  free security — they cost nothing and limit blast radius if the process is compromised.

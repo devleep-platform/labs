@@ -1,0 +1,238 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-strace-debug
+title: "strace: Debug a Process That Fails Silently With No Error Output"
+description: >
+  A worker service exits with code 1 immediately after starting. No error is
+  written to any log. systemctl shows only "Main process exited, code=exited, status=1".
+  Use strace to trace system calls, identify the exact failure point, fix it,
+  and document the debugging process.
+
+track: linux
+module: linux-incident-response
+sort_order: 250
+difficulty: advanced
+engineer_level: L3
+mode: incident
+
+tags:
+  - linux
+  - strace
+  - debugging
+  - systemcalls
+  - troubleshooting
+  - incident
+  - incident-response
+  - silent-failure
+
+estimated_minutes: 60
+timeout_minutes: 120
+
+terraform_module: labs/linux-ec2
+scenario_id: silent-failure
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-performance-analysis
+  - linux-systemd-mastery
+
+briefing:
+  severity: sev-2
+  impact: Worker service offline — background job processing stopped
+  title: Worker Service Failing Silently
+  narrative: |
+    worker.service was deployed 4 hours ago and has never successfully started.
+    It exits immediately after launch with status=1.
+    The developer says "it works on my machine."
+    journalctl shows nothing useful — the process dies before writing any logs.
+    The application team is blocked. You need to find why the process is dying
+    and what it cannot find or access.
+  incident:
+    detected_at: "2026-05-12T08:00:00Z"
+    severity: sev-2
+    impacted_services: [worker, background-jobs, queue]
+
+evidence:
+  - type: log
+    title: journalctl -u worker.service output
+    content: |
+      May 12 08:00:14 prod-app-01 systemd[1]: Starting Worker Service...
+      May 12 08:00:14 prod-app-01 systemd[1]: worker.service: Main process exited, code=exited, status=1/FAILURE
+      May 12 08:00:14 prod-app-01 systemd[1]: worker.service: Failed with result 'exit-code'.
+      May 12 08:00:14 prod-app-01 systemd[1]: Failed to start Worker Service.
+  - type: slack
+    title: "#incidents"
+    content: |
+      dev-team: deployed worker-v2 at 08:00, never started
+      dev-team: no error in our logs — process dies instantly
+      dev-team: works in Docker locally, never seen this before
+      on-call: investigating
+
+objectives:
+  - Use strace to capture system calls made by the failing process
+  - Identify the exact syscall that returns an error (ENOENT, EACCES, EPERM, etc.)
+  - Understand what resource (file, socket, permission) the process cannot access
+  - Fix the underlying issue
+  - Document the strace debugging technique used
+
+deliverables:
+  - path: /tmp/strace-output.txt
+    description: |
+      Full strace output from the failing process:
+        - Captured with: strace -f -e trace=file,network,process worker
+        - The line showing the error (ENOENT, EACCES, etc.)
+        - The exact file or resource the process failed to access
+  - path: /tmp/strace-diagnosis.txt
+    description: |
+      Debugging analysis:
+        - What syscall failed
+        - What resource was missing or inaccessible
+        - Why it was missing (deployment issue, permissions, missing env var pointing to wrong path)
+        - What was fixed and how
+
+success_criteria:
+  - worker.service is active and running after the fix
+  - /tmp/strace-output.txt contains actual strace output showing the error
+  - /tmp/strace-diagnosis.txt identifies the root cause and fix
+  - The fix does not involve hacking the binary — only correcting environment or permissions
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      When a process fails with no output, it is crashing before it can write to a log.
+      This happens when the process cannot find a required file, cannot open a socket,
+      or does not have permission to access something it needs at startup.
+
+      strace shows every system call the process makes and whether it succeeded or failed.
+      The failure you are looking for will be a syscall returning -1 with an errno code:
+        ENOENT = No such file or directory
+        EACCES = Permission denied
+        ECONNREFUSED = Connection refused (socket or port)
+        EPERM = Operation not permitted
+
+      Run strace on the binary directly — not via systemctl — to see the full output.
+
+  - level: 2
+    text: |
+      Find the binary:
+        systemctl cat worker.service | grep ExecStart
+
+      Run strace on it directly:
+        sudo strace -f -e trace=file,network,process /path/to/worker 2>&1 | head -50
+        # -f follows child processes (forks)
+        # -e trace=file,network,process filters to the most useful syscall categories
+
+      Look for errors:
+        sudo strace /path/to/worker 2>&1 | grep -E "= -1|ENOENT|EACCES|EPERM|ECONNREFUSED"
+
+      Attach to a running process (if the window is wide enough):
+        sudo strace -p $(pgrep worker) 2>&1 | head -30
+
+      Read the error line:
+        openat(AT_FDCWD, "/etc/worker/config.yaml", O_RDONLY) = -1 ENOENT (No such file or directory)
+        # This means: the process tried to open /etc/worker/config.yaml and it does not exist
+
+  - level: 3
+    text: |
+      Full debugging procedure:
+
+        # 1. Find what the service is actually running
+        sudo systemctl cat worker.service | grep -E "ExecStart|WorkingDir|User|Environment"
+
+        # 2. Run strace to capture all syscalls
+        BINARY=$(sudo systemctl cat worker.service | awk '/ExecStart=/{print $1}' | sed 's/ExecStart=//')
+        sudo strace -f -e trace=file,network,process "$BINARY" 2>&1 | sudo tee /tmp/strace-output.txt
+
+        # 3. Find the error
+        grep -E "= -1|ENOENT|EACCES|EPERM|ECONNREFUSED|EISDIR" /tmp/strace-output.txt | head -20
+
+        # 4. Common findings and fixes:
+        #
+        # ENOENT on a config file:
+        #   The config file path doesn't exist. Create it or fix the path.
+        #   sudo mkdir -p /etc/worker && sudo cp /opt/app/config/worker.yaml /etc/worker/config.yaml
+        #
+        # EACCES on a directory or socket:
+        #   The service user doesn't have permission.
+        #   sudo chown worker:worker /var/run/worker.sock
+        #   sudo chmod 755 /etc/worker/
+        #
+        # ENOENT on a shared library:
+        #   A .so file is missing. Check: ldd /path/to/worker
+        #   Install missing package or set LD_LIBRARY_PATH.
+        #
+        # ECONNREFUSED on a socket:
+        #   A dependency (database, Redis) is not running or not on the expected port.
+
+        # 5. Fix the identified issue, then start the service
+        sudo systemctl daemon-reload
+        sudo systemctl start worker.service
+        sudo systemctl status worker.service --no-pager
+
+        # 6. Document the finding
+        {
+          echo "=== ROOT CAUSE ==="
+          echo "Syscall that failed: [openat / connect / etc.]"
+          echo "Error: [ENOENT / EACCES / etc.]"
+          echo "Resource: [file path / socket / library]"
+          echo ""
+          echo "=== FIX ==="
+          echo "What was done: [created missing file / fixed permissions / etc.]"
+          echo ""
+          echo "=== VERIFICATION ==="
+          systemctl is-active worker.service
+        } | sudo tee /tmp/strace-diagnosis.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: worker-running
+      name: Worker Service Running
+      type: ssh
+      cmd: systemctl is-active worker.service 2>/dev/null
+      failure_hint: "Use strace to find what the process cannot access, fix it, then: sudo systemctl start worker.service"
+
+    - id: strace-output-written
+      name: strace Output Captured
+      type: multi_check
+      operator: all
+      checks:
+        - id: file-exists
+          type: ssh
+          cmd: test -s /tmp/strace-output.txt
+          failure_hint: "Run: sudo strace -f /path/to/worker 2>&1 | tee /tmp/strace-output.txt"
+        - id: has-syscalls
+          type: ssh
+          cmd: grep -qE "open|read|stat|connect|execve" /tmp/strace-output.txt
+          failure_hint: The strace output should contain system call names like openat, stat, connect
+
+    - id: diagnosis-written
+      name: Root Cause Documented
+      type: ssh
+      cmd: test -s /tmp/strace-diagnosis.txt && grep -qi "fix\|root cause\|enoent\|eacces\|error\|missing\|permission" /tmp/strace-diagnosis.txt
+      failure_hint: Document the failing syscall, the error code, the resource affected, and the fix in /tmp/strace-diagnosis.txt
+
+completion_message: |
+  strace is the tool for when there is nothing else to look at.
+  grep -E "= -1" on the strace output shows every failing syscall.
+  ENOENT means a file is missing. EACCES means permissions are wrong.
+  ECONNREFUSED means a dependency is not running.
+  These three errors account for the majority of silent startup failures.
+  Every engineer should be comfortable running strace on an unknown binary
+  and reading the failure line — it removes entire categories of "I have no idea
+  why this doesn't work" from the problem space.

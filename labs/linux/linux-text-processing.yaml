@@ -1,0 +1,185 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-text-processing
+title: "Text Processing: grep, awk, sed, and cut for Log Analysis"
+description: >
+  Every incident ends with log analysis. Learn to extract specific signals
+  from system logs using grep, awk, sed, and cut — the tools that work
+  at 3 AM when no GUI is available.
+
+track: linux
+module: linux-fundamentals
+sort_order: 50
+difficulty: beginner
+engineer_level: L1
+mode: guided
+
+tags:
+  - linux
+  - grep
+  - awk
+  - sed
+  - cut
+  - logs
+  - text-processing
+  - fundamentals
+
+estimated_minutes: 50
+timeout_minutes: 90
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-process-control
+
+briefing:
+  severity: sev-4
+  impact: No production impact — skill lab
+  title: Log Analysis Task
+  narrative: |
+    grep, awk, sed, and cut are not optional. They appear in every monitoring
+    script, every log parser, and every post-mortem. You cannot call yourself
+    operational on Linux without being fluent in text pipelines.
+    These four tasks use real system logs on a running EC2 instance.
+
+evidence:
+  - type: note
+    title: Tool guide
+    content: |
+      grep  = filter lines (which lines match?)
+      awk   = field extraction (what is in column 3?)
+      sed   = line transformation (replace this with that)
+      cut   = column slicing (give me fields 1 and 5)
+      The power is in combining them with pipes.
+
+objectives:
+  - Use grep with -E, -i, -v, -c, -A, -B to filter log lines
+  - Extract and compute values from structured text with awk
+  - Transform log content with sed substitution
+  - Build a pipeline that answers a real question from a log file
+
+deliverables:
+  - path: /tmp/ssh-failures.txt
+    description: |
+      Top 10 source IPs with failed SSH login attempts from /var/log/auth.log,
+      with occurrence count. Format: "  5 192.168.1.100"
+  - path: /tmp/error-count.txt
+    description: Count of lines containing "error" (case-insensitive) in /var/log/syslog
+  - path: /tmp/awk-output.txt
+    description: First 20 lines of /var/log/auth.log with only date, time, and message fields
+  - path: /tmp/motd-modified.txt
+    description: Contents of /etc/motd with "ubuntu" replaced by "engineer" (file not modified)
+
+success_criteria:
+  - /tmp/ssh-failures.txt written with at least 1 entry
+  - /tmp/error-count.txt contains a number
+  - /tmp/awk-output.txt contains at least 5 lines
+  - /tmp/motd-modified.txt exists and differs from /etc/motd
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      grep:  -E extended regex, -i case-insensitive, -v invert, -c count,
+             -A N lines after match, -o only matching part
+      awk:   splits lines into fields. $1=first, $NF=last, $(NF-3)=third from last
+      sed:   's/old/new/g' replaces all occurrences. Output to stdout by default.
+      cut:   -d DELIM -f N takes field N split by DELIM
+
+      Failed SSH login lines in auth.log contain "Failed password".
+      The source IP is the 11th field from the end: $(NF-3)
+
+  - level: 2
+    text: |
+      SSH failures:
+        grep "Failed password" /var/log/auth.log 2>/dev/null \
+          | awk '{print $(NF-3)}' | sort | uniq -c | sort -rn | head -10 \
+          > /tmp/ssh-failures.txt
+
+      Error count:
+        grep -ic "error" /var/log/syslog 2>/dev/null > /tmp/error-count.txt
+
+      awk fields:
+        awk '{print $1, $2, $3, $6}' /var/log/auth.log 2>/dev/null \
+          | head -20 > /tmp/awk-output.txt
+
+      sed replace (stdout only, original unchanged):
+        sed 's/ubuntu/engineer/g' /etc/motd > /tmp/motd-modified.txt
+
+  - level: 3
+    text: |
+      Full commands:
+
+        # SSH failures: extract source IP, count, top attackers
+        grep "Failed password" /var/log/auth.log 2>/dev/null \
+          | awk '{print $(NF-3)}' \
+          | sort | uniq -c | sort -rn \
+          | head -10 > /tmp/ssh-failures.txt
+        cat /tmp/ssh-failures.txt
+
+        # syslog error count (case-insensitive)
+        grep -ic "error" /var/log/syslog 2>/dev/null > /tmp/error-count.txt
+        # If syslog is empty: grep -ic "error" /var/log/kern.log 2>/dev/null > /tmp/error-count.txt
+        cat /tmp/error-count.txt
+
+        # awk: date, time, hostname, and process fields
+        awk '{print $1, $2, $3, $5}' /var/log/auth.log 2>/dev/null \
+          | head -20 > /tmp/awk-output.txt
+        head -3 /tmp/awk-output.txt
+
+        # sed: stdout substitution — original file untouched
+        sed 's/ubuntu/engineer/g' /etc/motd > /tmp/motd-modified.txt
+        diff /etc/motd /tmp/motd-modified.txt     # shows what changed
+
+        # Bonus — top 5 syslog sources:
+        awk '{print $5}' /var/log/syslog 2>/dev/null \
+          | sed 's/\[.*//' | sort | uniq -c | sort -rn | head -5
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: ssh-failures-written
+      name: SSH Failure IPs Written
+      type: ssh
+      cmd: test -s /tmp/ssh-failures.txt
+      failure_hint: "Run: grep 'Failed password' /var/log/auth.log | awk '{print $(NF-3)}' | sort | uniq -c | sort -rn | head -10 > /tmp/ssh-failures.txt"
+
+    - id: error-count-written
+      name: Error Count Written
+      type: ssh
+      cmd: grep -qE '^[0-9]+' /tmp/error-count.txt 2>/dev/null
+      failure_hint: "Run: grep -ic 'error' /var/log/syslog > /tmp/error-count.txt"
+
+    - id: awk-output-written
+      name: awk Output Written
+      type: ssh
+      cmd: test -s /tmp/awk-output.txt && test $(wc -l < /tmp/awk-output.txt) -ge 5
+      failure_hint: "Run: awk '{print $1, $2, $3}' /var/log/auth.log | head -20 > /tmp/awk-output.txt"
+
+    - id: motd-modified-written
+      name: sed Output Written
+      type: ssh
+      cmd: test -s /tmp/motd-modified.txt
+      failure_hint: "Run: sed 's/ubuntu/engineer/g' /etc/motd > /tmp/motd-modified.txt"
+
+completion_message: |
+  grep=filter, awk=fields, sed=transform, cut=columns.
+  Knowing which tool to reach for first — and how to combine them in a pipeline —
+  is what separates engineers who can work a log file in 30 seconds from
+  engineers who spend 10 minutes copying lines into a text editor.

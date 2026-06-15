@@ -1,0 +1,236 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-boot-analysis
+title: "Boot Analysis: Diagnose and Fix a Service Failing at Startup"
+description: >
+  After a routine kernel update and reboot, two critical services are not running.
+  systemd's dependency chain is broken somewhere. Use systemd-analyze and journalctl
+  to find which unit failed, why it failed, and fix it — without rebooting again.
+
+track: linux
+module: linux-troubleshooting
+sort_order: 210
+difficulty: advanced
+engineer_level: L3
+mode: incident
+
+tags:
+  - linux
+  - systemd
+  - boot
+  - startup
+  - journalctl
+  - systemd-analyze
+  - troubleshooting
+  - incident
+
+estimated_minutes: 55
+timeout_minutes: 110
+
+terraform_module: labs/linux-ec2
+scenario_id: boot-misconfigured
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-systemd-mastery
+
+briefing:
+  severity: sev-2
+  impact: Two services down after reboot — primary application and database proxy not running
+  title: Services Failed After Reboot
+  narrative: |
+    A kernel security update was applied and the server was rebooted at 03:00 for
+    the maintenance window. At 03:17 the application health check failed.
+    myapp.service and pgbouncer.service are not running.
+    The previous engineer SSHed in, panicked, and tried systemctl restart myapp.service —
+    which also failed. The root cause is in the boot sequence, not the service itself.
+  incident:
+    detected_at: "2026-04-05T03:17:00Z"
+    severity: sev-2
+    impacted_services: [myapp, pgbouncer, web]
+
+evidence:
+  - type: pagerduty
+    title: "P2: prod-app-01 health check FAILING after reboot"
+    content: |
+      Health check: FAIL
+      myapp.service: inactive (dead)
+      pgbouncer.service: inactive (dead)
+      Host rebooted at: 03:02 UTC (maintenance window)
+      Previous status: all green before reboot
+  - type: slack
+    title: "#incidents at 03:18"
+    content: |
+      engineer-2: tried systemctl restart myapp — failed immediately
+      engineer-2: not sure why, it was fine before the update
+      engineer-2: journalctl shows an error but I don't know what it means
+      engineer-2: escalating, going offline
+
+objectives:
+  - Use systemd-analyze to identify what slowed or blocked the boot sequence
+  - Use journalctl -u to find the exact failure reason for each broken service
+  - Trace the dependency chain to identify the root cause unit
+  - Fix the root cause unit and start all dependent services
+  - Document the failure timeline and fix
+
+deliverables:
+  - path: /tmp/boot-analysis.txt
+    description: |
+      Boot failure analysis containing:
+        - systemd-analyze blame output (slowest units)
+        - systemd-analyze critical-chain for the failing service
+        - journalctl -u output showing the exact error
+        - Dependency chain: which unit failed first and caused the cascade
+  - path: /tmp/boot-fix.txt
+    description: |
+      Post-fix verification:
+        - systemctl status myapp.service (must show active running)
+        - systemctl status pgbouncer.service (must show active running)
+        - What was the root cause and how was it fixed
+
+success_criteria:
+  - Root cause unit identified and documented in /tmp/boot-analysis.txt
+  - myapp.service is active and running
+  - pgbouncer.service is active and running
+  - /tmp/boot-fix.txt shows both services running and explains the fix
+  - systemd-analyze critical-chain output included in analysis
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      When services fail after a reboot, the failure is almost never in the service itself.
+      It is in a dependency the service assumed would be available.
+
+      Ask these questions before reading logs:
+        - What does myapp.service depend on? (systemctl show -p Wants,Requires,After)
+        - Which of those dependencies failed or started too late?
+        - Did something that was working before the kernel update change behavior?
+
+      systemd records the entire boot sequence. All of it is in the journal.
+      You do not need to reproduce the failure — it already happened and is logged.
+
+  - level: 2
+    text: |
+      Boot timeline and dependency analysis:
+        systemd-analyze                        # total boot time
+        systemd-analyze blame                  # all units by startup time
+        systemd-analyze critical-chain myapp.service   # dependency chain
+
+      Service failure investigation:
+        systemctl status myapp.service          # last exit code and recent log
+        journalctl -u myapp.service -b -n 50    # logs from current boot
+        journalctl -u myapp.service -b --no-pager | grep -i "error\|fail\|exit"
+
+      Dependency inspection:
+        systemctl show myapp.service -p Wants,Requires,After,Before
+        systemctl list-dependencies myapp.service
+
+      Common post-reboot failure causes:
+        - A socket or mount that myapp Requires is not starting
+        - A file path that myapp ExecStartPre checks no longer exists
+        - A network interface or NFS mount that is not ready at service start time
+        - A dependency on a service that was renamed or removed in the kernel update
+
+  - level: 3
+    text: |
+      Investigation sequence:
+
+        # 1. Document what systemd saw during boot
+        systemd-analyze | sudo tee /tmp/boot-analysis.txt
+        echo "" | sudo tee -a /tmp/boot-analysis.txt
+        echo "=== BLAME ===" | sudo tee -a /tmp/boot-analysis.txt
+        systemd-analyze blame | head -20 | sudo tee -a /tmp/boot-analysis.txt
+
+        # 2. Find the failing services
+        systemctl --failed | sudo tee -a /tmp/boot-analysis.txt
+
+        # 3. Trace the dependency chain
+        echo "=== CRITICAL CHAIN ===" | sudo tee -a /tmp/boot-analysis.txt
+        systemd-analyze critical-chain myapp.service 2>/dev/null | sudo tee -a /tmp/boot-analysis.txt
+
+        # 4. Read the actual error
+        echo "=== JOURNAL myapp ===" | sudo tee -a /tmp/boot-analysis.txt
+        journalctl -u myapp.service -b --no-pager | sudo tee -a /tmp/boot-analysis.txt
+
+        # 5. Check dependencies
+        systemctl show myapp.service -p Requires | sudo tee -a /tmp/boot-analysis.txt
+
+        # 6. Fix the root cause
+        # If a mount unit: check /etc/fstab UUID is correct
+        #   sudo systemctl daemon-reload
+        #   sudo systemctl start <mount-unit>
+        # If an ExecStartPre script: check it exists and is executable
+
+        # 7. Start the services after root cause fixed
+        sudo systemctl start myapp.service
+        sudo systemctl start pgbouncer.service
+
+        # 8. Document the fix
+        {
+          echo "=== STATUS AFTER FIX ==="
+          systemctl status myapp.service --no-pager
+          echo ""
+          systemctl status pgbouncer.service --no-pager
+          echo ""
+          echo "=== ROOT CAUSE ==="
+          echo "Describe what failed and why"
+        } | sudo tee /tmp/boot-fix.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: analysis-written
+      name: Boot Analysis Documented
+      type: multi_check
+      operator: all
+      checks:
+        - id: file-exists
+          type: ssh
+          cmd: test -s /tmp/boot-analysis.txt
+          failure_hint: Write systemd-analyze and journalctl output to /tmp/boot-analysis.txt
+        - id: has-critical-chain
+          type: ssh
+          cmd: grep -qi "critical\|chain\|blame\|journal\|error\|fail" /tmp/boot-analysis.txt
+          failure_hint: Include systemd-analyze critical-chain and journalctl output in /tmp/boot-analysis.txt
+
+    - id: myapp-running
+      name: myapp.service Active
+      type: ssh
+      cmd: systemctl is-active myapp.service 2>/dev/null
+      failure_hint: "Find the root cause first. Then: sudo systemctl start myapp.service"
+
+    - id: pgbouncer-running
+      name: pgbouncer.service Active
+      type: ssh
+      cmd: systemctl is-active pgbouncer.service 2>/dev/null
+      failure_hint: "Find the root cause first. Then: sudo systemctl start pgbouncer.service"
+
+    - id: fix-documented
+      name: Fix Documented
+      type: ssh
+      cmd: test -s /tmp/boot-fix.txt && grep -qi "root cause\|fix\|reason\|active\|running" /tmp/boot-fix.txt
+      failure_hint: Document the root cause and fix in /tmp/boot-fix.txt including service status output
+
+completion_message: |
+  systemd records everything. systemd-analyze critical-chain shows you exactly
+  which unit in the dependency graph blocked startup and how long each step took.
+  journalctl -b reads only the current boot — essential for post-reboot incidents.
+  The most common post-update breakage: a filesystem UUID changed after disk resize,
+  or a pre-start script references a path that moved in the new kernel version.
+  Always check dependencies before restarting a failed service — restarting
+  without fixing the root cause just fails again and obscures the original error.

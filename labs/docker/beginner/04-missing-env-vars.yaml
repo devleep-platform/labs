@@ -1,0 +1,133 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  last_updated: 2026-06-14
+
+id: docker-missing-env-vars
+title: "Missing Env Vars"
+description: >
+  A service container keeps crashing on startup.
+  The app logs show it's unhappy — but the error is vague.
+  Figure out what it needs and get it running.
+
+track: docker
+module: docker-fundamentals
+sort_order: 40
+difficulty: beginner
+engineer_level: L1
+mode: break-fix
+
+tags:
+  - docker
+  - environment-variables
+  - configuration
+  - debugging
+
+estimated_minutes: 30
+timeout_minutes: 60
+
+terraform_module: labs/docker-ec2
+scenario_id: docker-missing-env
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - docker-container-wont-start
+
+briefing:
+  severity: sev-2
+  impact: API service unavailable — exits on every start attempt
+  title: api-app Crash Loop on Deploy
+  narrative: |
+    A new service was deployed 15 minutes ago. It has never started successfully.
+    The deploy pipeline shows green but the container exits immediately.
+    You have access to the host. Work out why it won't start and fix it.
+
+objectives:
+  - Read container logs to identify what the app is complaining about
+  - Determine which environment variables the application requires
+  - Re-run the container with the correct environment and confirm it stays up
+
+success_criteria:
+  - A container named api-app is running and stable
+  - Container logs show "API server starting on :5000"
+  - Container has been running for at least 30 seconds
+
+hints:
+  - level: 1
+    text: |
+      The app is telling you what it needs — you just have to read it:
+        docker logs api-app
+        docker ps -a
+
+  - level: 2
+    text: |
+      The logs will tell you which env vars are missing.
+      Re-run the container with -e flags:
+
+        docker stop api-app && docker rm api-app
+        docker run -d \
+          --name api-app \
+          -e DB_HOST=localhost \
+          -e DB_PORT=5432 \
+          -e APP_SECRET=dev-secret \
+          api-app:latest
+
+  - level: 3
+    text: |
+      Full fix sequence:
+        # Read the crash reason
+        docker logs api-app
+
+        # Stop and remove the broken container
+        docker stop api-app 2>/dev/null; docker rm api-app 2>/dev/null
+
+        # Re-run with all required env vars
+        docker run -d \
+          --name api-app \
+          --restart unless-stopped \
+          -e DB_HOST=db.internal \
+          -e DB_PORT=5432 \
+          -e APP_SECRET=supersecret \
+          api-app:latest
+
+        # Confirm it's running
+        docker ps
+        docker logs api-app
+
+validation:
+  strategy: all
+  default_timeout_seconds: 10
+  checks:
+    - id: api-app-running
+      name: api-app Container Is Running
+      type: ssh
+      cmd: docker ps --filter "name=api-app" --filter "status=running" | grep -q api-app
+      failure_hint: Re-run api-app with the required environment variables
+
+    - id: api-app-logs
+      name: App Logs Show Successful Start
+      type: ssh
+      cmd: docker logs api-app 2>&1 | grep -q "API server starting"
+      failure_hint: Container must log "API server starting on :5000" — check env vars are correct
+
+    - id: api-app-stable
+      name: Container Has Been Running 30+ Seconds
+      type: ssh
+      cmd: |
+        started=$(docker inspect api-app --format '{{.State.StartedAt}}' 2>/dev/null)
+        started_epoch=$(date -d "$started" +%s 2>/dev/null)
+        now=$(date +%s)
+        [ $((now - started_epoch)) -ge 30 ]
+      failure_hint: Container must stay running for at least 30 seconds without restarting
+
+completion_message: |
+  Missing environment variables are responsible for a huge proportion of
+  "it works in dev but not prod" failures. The fix is always the same:
+  read the logs first — the app almost always tells you exactly what it needs.

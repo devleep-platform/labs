@@ -1,0 +1,212 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-logrotate
+title: "Log Rotation: Fix a Broken logrotate Before the Disk Fills"
+description: >
+  Log rotation has been silently failing for weeks. Disk usage is at 73% and
+  climbing. Diagnose why logrotate stopped working, fix the configuration,
+  run it manually to recover space, and verify it will run correctly going forward.
+
+track: linux
+module: linux-troubleshooting
+sort_order: 200
+difficulty: intermediate
+engineer_level: L2
+mode: incident
+
+tags:
+  - linux
+  - logrotate
+  - logs
+  - disk
+  - troubleshooting
+  - incident
+  - cron
+
+estimated_minutes: 45
+timeout_minutes: 90
+
+terraform_module: labs/linux-ec2
+scenario_id: log-flood
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-scheduled-automation
+  - linux-storage-management
+
+briefing:
+  severity: sev-3
+  impact: Disk filling — service outage risk within 48 hours if unresolved
+  title: Disk Filling — Log Rotation Broken
+  narrative: |
+    Disk monitoring triggered at 70%. Investigation showed /var/log is consuming
+    over 8GB — three times the expected size. Log rotation has been configured
+    but the logs are growing unchecked. The last successful rotation was 23 days ago.
+    A service outage will occur if disk hits 100%. You have time to fix it properly,
+    but not time to ignore it.
+  incident:
+    detected_at: "2026-02-08T07:00:00Z"
+    severity: sev-3
+    impacted_services: [monitoring, disk]
+
+evidence:
+  - type: pagerduty
+    title: "P3: prod-app-01 disk usage 73% — trending to 100% in ~48h"
+    content: |
+      Alert: Disk usage > 70% on /
+      Current: 73% (growing ~1.2GB/day)
+      Last triggered: never (new alert rule)
+      /var/log size: 8.3GB
+  - type: note
+    title: From the previous on-call
+    content: |
+      I checked logrotate.conf — looks configured.
+      But /var/log/myapp/ has files from 3 weeks ago with no rotation.
+      logrotate -d didn't show errors but rotation never ran.
+      I didn't have time to dig further.
+
+objectives:
+  - Use logrotate -d (debug/dry-run) to diagnose why rotation is not working
+  - Identify the broken configuration causing logrotate to skip files
+  - Fix the configuration and run logrotate manually to recover disk space
+  - Verify the fix will hold by confirming cron scheduling
+
+deliverables:
+  - path: /tmp/logrotate-diagnosis.txt
+    description: |
+      Root cause of the broken rotation:
+        - What logrotate -d shows before the fix
+        - Which config file has the problem and what is wrong
+  - path: /tmp/logrotate-after.txt
+    description: |
+      Post-fix verification:
+        - logrotate -d output after the fix (no errors)
+        - df -h showing recovered disk space
+        - ls -lh /var/log/myapp/ showing rotated files
+
+success_criteria:
+  - Root cause identified and documented in /tmp/logrotate-diagnosis.txt
+  - logrotate configuration error fixed
+  - logrotate --force runs without errors
+  - Disk usage on / recovered by at least 500MB
+  - /tmp/logrotate-after.txt shows clean state
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      logrotate has a dry-run mode that shows exactly what it would do and why it skips files.
+      Start there. Read the output carefully — it tells you the exact reason each file is skipped.
+
+      Common causes of silent rotation failure:
+        - Log file not owned by the user specified in the config
+        - Config file has wrong permissions (must be root-owned, not world-writable)
+        - Log file path in config does not match actual log file location
+        - create directive specifying a user/group that does not exist
+        - Config syntax error — logrotate stops at first error
+
+  - level: 2
+    text: |
+      Dry-run mode — always start here:
+        sudo logrotate -d /etc/logrotate.conf 2>&1 | head -50
+        sudo logrotate -d /etc/logrotate.d/myapp 2>&1
+
+      Check for config file permission problems:
+        ls -la /etc/logrotate.d/
+        # Must be: -rw-r--r-- root root (644)
+        # World-writable config files are IGNORED by logrotate silently
+
+      Check log file ownership vs config:
+        cat /etc/logrotate.d/myapp      # what user does it expect?
+        ls -la /var/log/myapp/          # what user actually owns the files?
+
+      Check cron scheduling:
+        cat /etc/cron.daily/logrotate   # is this file present and executable?
+        sudo run-parts --test /etc/cron.daily
+
+      Force a run after fixing:
+        sudo logrotate --force /etc/logrotate.d/myapp
+
+  - level: 3
+    text: |
+      Full investigation:
+
+        # 1. Check disk state
+        df -h /
+        du -sh /var/log/*/  2>/dev/null | sort -rh | head -10
+
+        # 2. Dry-run to see why it's failing
+        sudo logrotate -d /etc/logrotate.conf 2>&1 | grep -E "error|skip|not|warning" | head -20
+        sudo logrotate -d /etc/logrotate.d/myapp 2>&1
+
+        # 3. Check config file permissions (world-writable = silently ignored)
+        ls -la /etc/logrotate.d/
+        # If any file is world-writable:
+        sudo chmod 644 /etc/logrotate.d/myapp
+
+        # 4. Check log file ownership matches config
+        grep "^create" /etc/logrotate.d/myapp      # expected owner
+        ls -la /var/log/myapp/                       # actual owner
+        # If mismatched:
+        sudo chown -R myapp:myapp /var/log/myapp/
+
+        # 5. Check log path in config exists
+        grep -E "^\s*/var" /etc/logrotate.d/myapp   # path in config
+        ls -la /var/log/myapp/*.log                  # does it match?
+
+        # 6. Fix, document, then force-run
+        sudo logrotate -d /etc/logrotate.d/myapp 2>&1 > /tmp/logrotate-diagnosis.txt
+        sudo logrotate --force /etc/logrotate.d/myapp
+
+        # 7. Verify
+        df -h /
+        ls -lh /var/log/myapp/
+        sudo logrotate -d /etc/logrotate.d/myapp 2>&1 > /tmp/logrotate-after.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: diagnosis-written
+      name: Root Cause Documented
+      type: ssh
+      cmd: test -s /tmp/logrotate-diagnosis.txt
+      failure_hint: Run 'sudo logrotate -d /etc/logrotate.d/myapp 2>&1' and write the output to /tmp/logrotate-diagnosis.txt
+
+    - id: logrotate-runs-clean
+      name: logrotate Runs Without Errors
+      type: ssh
+      cmd: test $(sudo logrotate -d /etc/logrotate.conf 2>&1 | grep -ci "error\|no log files\|skipping" || echo 0) -eq 0
+      failure_hint: "Fix the logrotate config first: check permissions (chmod 644) and file ownership"
+
+    - id: disk-recovered
+      name: Disk Space Recovered
+      type: ssh
+      cmd: df / | awk 'NR==2{gsub("%","",$5); if ($5<70) exit 0; exit 1}'
+      failure_hint: "Run: sudo logrotate --force /etc/logrotate.conf to compress and rotate old logs"
+
+    - id: after-written
+      name: Post-Fix Verification Written
+      type: ssh
+      cmd: test -s /tmp/logrotate-after.txt && grep -qi "log\|rotat\|\.gz\|ok" /tmp/logrotate-after.txt
+      failure_hint: Write df -h and ls -lh /var/log/myapp/ output after the fix to /tmp/logrotate-after.txt
+
+completion_message: |
+  logrotate silently skips world-writable config files as a security measure.
+  There is no error message. The logs just keep growing.
+  The dry-run flag (-d) is the only way to see why files are being skipped.
+  Always use logrotate -d after any config change before relying on the cron job.
+  A logrotate configuration that has never been tested with -d is a ticking disk bomb.

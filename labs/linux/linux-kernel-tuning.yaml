@@ -1,0 +1,253 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-kernel-tuning
+title: "Kernel Tuning: Stop the OOM Killer From Terminating Your Application"
+description: >
+  The OOM killer has fired twice in the past hour and terminated the application
+  process both times. Memory pressure is real but the application can survive
+  with proper tuning. Diagnose what is exhausting memory, tune kernel OOM parameters
+  to protect critical processes, and set sysctl values that survive a reboot.
+
+track: linux
+module: linux-incident-response
+sort_order: 220
+difficulty: advanced
+engineer_level: L3
+mode: incident
+
+tags:
+  - linux
+  - kernel
+  - oom
+  - sysctl
+  - memory
+  - tuning
+  - performance
+  - incident
+  - incident-response
+
+estimated_minutes: 60
+timeout_minutes: 120
+
+terraform_module: labs/linux-ec2
+scenario_id: oom-killer
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-performance-analysis
+  - linux-storage-management
+
+briefing:
+  severity: sev-1
+  impact: Application restarting due to OOM kills — data loss on each kill
+  title: OOM Killer Firing in Production
+  narrative: |
+    The OOM killer has terminated the main application process twice in the last
+    60 minutes. Each kill caused data loss as the application's in-memory queue
+    was discarded. The server has 2GB RAM and no swap.
+    Memory pressure is from a combination of the application, a logging agent,
+    and MySQL. The application must survive even when the system is under pressure.
+  incident:
+    detected_at: "2026-04-10T14:05:00Z"
+    severity: sev-1
+    impacted_services: [app, queue, customers]
+
+evidence:
+  - type: log
+    title: /var/log/kern.log — OOM events
+    content: |
+      Apr 10 14:03:14 kernel: Out of memory: Kill process 4821 (myapp) score 892 or sacrifice child
+      Apr 10 14:03:14 kernel: Killed process 4821 (myapp) total-vm:987648kB, anon-rss:891234kB
+      Apr 10 14:47:22 kernel: Out of memory: Kill process 5103 (myapp) score 887 or sacrifice child
+      Apr 10 14:47:22 kernel: Killed process 5103 (myapp) total-vm:994512kB, anon-rss:887340kB
+  - type: pagerduty
+    title: "P1: myapp process down — OOM kill — 2nd occurrence"
+    content: |
+      Process: myapp (PID 5103) — terminated by OOM killer
+      Second occurrence in 60 minutes
+      Total memory: 2048MB
+      Available at kill time: 4MB
+      Swap: 0 (none configured)
+
+objectives:
+  - Read /proc/meminfo and understand where memory is going
+  - Check OOM score for each major process
+  - Set oom_score_adj on the critical application process to protect it
+  - Add swap space to give the kernel breathing room under pressure
+  - Write sysctl settings to /etc/sysctl.d/ that survive reboot
+  - Document all tuning changes with rationale
+
+deliverables:
+  - path: /tmp/oom-diagnosis.txt
+    description: |
+      Memory and OOM diagnosis:
+        - /proc/meminfo output (current memory state)
+        - Top memory consumers by RSS (ps aux sorted by memory)
+        - OOM score of each major process (cat /proc/PID/oom_score)
+        - Which process has the highest OOM score and why
+  - path: /tmp/oom-tuning.txt
+    description: |
+      Tuning applied:
+        - oom_score_adj value set for the application process
+        - Swap file size added and swappiness setting
+        - sysctl changes and their rationale
+        - Verification that settings are persistent in /etc/sysctl.d/
+
+success_criteria:
+  - myapp process oom_score_adj set to -300 or lower
+  - Swap file of at least 512MB added and active
+  - vm.swappiness tuned in /etc/sysctl.d/
+  - /tmp/oom-diagnosis.txt documents memory consumers and OOM scores
+  - /tmp/oom-tuning.txt documents all changes with rationale
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      The OOM killer picks the process to kill based on OOM score.
+      Higher score = more likely to be killed.
+      oom_score_adj ranges from -1000 (never kill) to +1000 (kill first).
+
+      Setting oom_score_adj to a negative value for critical processes
+      protects them. But this means another process is killed instead.
+      Choose deliberately:
+        - Which processes can you lose? (log agents, cleanup jobs)
+        - Which must survive? (application, database)
+
+  - level: 2
+    text: |
+      Read memory state:
+        cat /proc/meminfo | head -20
+        free -h
+        ps aux --sort=-%mem | head -15
+
+      Read OOM scores:
+        cat /proc/$(pgrep myapp)/oom_score        # current score (higher = more killable)
+        cat /proc/$(pgrep myapp)/oom_score_adj    # current adjustment
+
+      Protect the application (non-persistent):
+        echo -500 | sudo tee /proc/$(pgrep myapp)/oom_score_adj
+
+      Add swap:
+        sudo fallocate -l 1G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+      Persist sysctl changes:
+        echo "vm.swappiness=10" | sudo tee /etc/sysctl.d/99-memory-tuning.conf
+        sudo sysctl -p /etc/sysctl.d/99-memory-tuning.conf
+
+  - level: 3
+    text: |
+      Full procedure:
+
+        # 1. Diagnose memory state
+        {
+          echo "=== MEMINFO ==="
+          cat /proc/meminfo | head -20
+          echo ""
+          echo "=== TOP MEMORY CONSUMERS ==="
+          ps aux --sort=-%mem | head -15
+          echo ""
+          echo "=== OOM SCORES ==="
+          for pid in $(ps aux | awk 'NR>1{print $2}' | head -20); do
+            name=$(cat /proc/$pid/comm 2>/dev/null)
+            score=$(cat /proc/$pid/oom_score 2>/dev/null)
+            adj=$(cat /proc/$pid/oom_score_adj 2>/dev/null)
+            [ -n "$score" ] && echo "PID=$pid NAME=$name score=$score adj=$adj"
+          done
+        } | sudo tee /tmp/oom-diagnosis.txt
+
+        # 2. Protect the application
+        APP_PID=$(pgrep -f myapp | head -1)
+        echo -500 | sudo tee /proc/$APP_PID/oom_score_adj
+
+        # 3. Add swap
+        sudo fallocate -l 1G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        grep -q swapfile /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+        # 4. Tune sysctl
+        sudo tee /etc/sysctl.d/99-memory-tuning.conf << 'EOF'
+        vm.swappiness=10
+        vm.dirty_ratio=15
+        vm.dirty_background_ratio=5
+        EOF
+        sudo sysctl -p /etc/sysctl.d/99-memory-tuning.conf
+
+        # 5. Document tuning
+        {
+          echo "=== OOM SCORE ADJ AFTER ==="
+          cat /proc/$APP_PID/oom_score_adj
+          echo ""
+          echo "=== SWAP ==="
+          swapon -s
+          free -h
+          echo ""
+          echo "=== SYSCTL ==="
+          cat /etc/sysctl.d/99-memory-tuning.conf
+        } | sudo tee /tmp/oom-tuning.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: app-oom-protected
+      name: Application OOM Score Adjusted
+      type: ssh
+      cmd: |
+        APP_PID=$(pgrep -f myapp | head -1)
+        [ -n "$APP_PID" ] || exit 1
+        ADJ=$(cat /proc/$APP_PID/oom_score_adj 2>/dev/null)
+        test "${ADJ:-0}" -le -300
+      failure_hint: "Set oom_score_adj: echo -500 | sudo tee /proc/$(pgrep myapp)/oom_score_adj"
+
+    - id: swap-active
+      name: Swap Space Active
+      type: ssh
+      cmd: free -m | awk '/Swap/{if ($2 > 512) exit 0; exit 1}'
+      failure_hint: "Add swap: sudo fallocate -l 1G /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
+
+    - id: sysctl-persisted
+      name: Sysctl Settings Persisted
+      type: ssh
+      cmd: test -f /etc/sysctl.d/99-memory-tuning.conf && grep -q "vm.swappiness" /etc/sysctl.d/99-memory-tuning.conf
+      failure_hint: Write vm.swappiness to /etc/sysctl.d/99-memory-tuning.conf for persistence across reboots
+
+    - id: diagnosis-written
+      name: OOM Diagnosis Documented
+      type: ssh
+      cmd: test -s /tmp/oom-diagnosis.txt && grep -qi "oom\|score\|mem" /tmp/oom-diagnosis.txt
+      failure_hint: Document memory consumers and OOM scores in /tmp/oom-diagnosis.txt
+
+    - id: tuning-written
+      name: Tuning Changes Documented
+      type: ssh
+      cmd: test -s /tmp/oom-tuning.txt && grep -qi "swap\|sysctl\|oom_score" /tmp/oom-tuning.txt
+      failure_hint: Document all tuning changes with rationale in /tmp/oom-tuning.txt
+
+completion_message: |
+  The OOM killer is the kernel's last resort when physical memory is exhausted.
+  oom_score_adj shifts the kill priority — -1000 means "never kill this process."
+  But lowering one process's score raises the relative likelihood of killing others.
+  Adding swap gives the kernel a pressure valve before it needs to kill anything.
+  vm.swappiness=10 means the kernel only uses swap when free memory drops below 10%.
+  These settings do not fix a memory leak — they buy time to find one.
+  The right fix is understanding why the application is consuming 900MB of RSS.

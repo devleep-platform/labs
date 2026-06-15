@@ -1,0 +1,208 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-users-and-access
+title: "Users and Access: Least Privilege from First Principles"
+description: >
+  A new developer needs server access. Create their account, assign groups,
+  configure targeted sudo without giving full root, and produce an access audit
+  that documents exactly what they can and cannot do.
+
+track: linux
+module: linux-administration
+sort_order: 40
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - users
+  - groups
+  - sudo
+  - permissions
+  - least-privilege
+  - administration
+
+estimated_minutes: 45
+timeout_minutes: 90
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-server-orientation
+
+briefing:
+  severity: sev-4
+  impact: No production impact — administration task
+  title: Developer Access Request
+  narrative: |
+    A developer joining the team needs access to a staging server.
+    They need to run the application, read logs, and restart the app service —
+    nothing else. Full sudo is not appropriate. This lab walks through setting
+    up the account correctly from scratch, then auditing what was actually granted.
+
+evidence:
+  - type: note
+    title: "Access Request JIRA-4421"
+    content: |
+      User: devuser
+      Required access:
+        - Read and write /opt/myapp/
+        - Restart myapp.service via sudo
+        - Read /var/log/ (but not write)
+      Must NOT have: full sudo, shell as root, write access to /etc/
+
+objectives:
+  - Create a user account with a home directory and correct shell
+  - Create a group and assign the user to it correctly
+  - Write a targeted sudoers rule using visudo-safe drop-in files
+  - Audit effective permissions with id, sudo -l, and stat
+
+deliverables:
+  - path: /etc/sudoers.d/devuser
+    description: |
+      A sudoers drop-in granting devuser exactly:
+        devuser ALL=(ALL) NOPASSWD: /bin/systemctl restart myapp.service
+      Nothing else.
+  - path: /tmp/access-audit.txt
+    description: |
+      Audit report containing:
+        - Output of: id devuser
+        - Output of: sudo -l -U devuser
+        - Proof devuser can restart myapp.service but cannot run arbitrary commands
+
+success_criteria:
+  - User devuser exists with /home/devuser and /bin/bash shell
+  - Group devteam exists with devuser as a member
+  - /etc/sudoers.d/devuser grants only systemctl restart myapp.service
+  - /tmp/access-audit.txt documents the effective permissions
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      User accounts live in /etc/passwd. Groups in /etc/group.
+      useradd -m -s /bin/bash creates home directory and sets shell.
+      usermod -aG adds to a group without removing existing group memberships.
+      Never edit /etc/sudoers directly — use drop-in files in /etc/sudoers.d/
+      and always validate with visudo -c before relying on them.
+
+  - level: 2
+    text: |
+      Create user and group:
+        sudo useradd -m -s /bin/bash devuser
+        sudo groupadd devteam
+        sudo usermod -aG devteam devuser
+        id devuser                         # verify group membership
+
+      Create targeted sudoers rule:
+        sudo tee /etc/sudoers.d/devuser << 'EOF'
+        devuser ALL=(ALL) NOPASSWD: /bin/systemctl restart myapp.service
+        EOF
+        sudo visudo -c -f /etc/sudoers.d/devuser   # always validate
+
+      Audit:
+        id devuser
+        sudo -l -U devuser
+        {
+          echo "=== id devuser ==="
+          id devuser
+          echo "=== sudo -l ==="
+          sudo -l -U devuser
+        } > /tmp/access-audit.txt
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        # Create the user
+        sudo useradd -m -s /bin/bash devuser
+        grep devuser /etc/passwd            # verify entry
+
+        # Create the group and add user
+        sudo groupadd devteam
+        sudo usermod -aG devteam devuser
+        id devuser                          # should show devteam in groups
+
+        # Targeted sudoers rule — one allowed command, nothing else
+        sudo tee /etc/sudoers.d/devuser << 'EOF'
+        devuser ALL=(ALL) NOPASSWD: /bin/systemctl restart myapp.service
+        EOF
+        sudo chmod 440 /etc/sudoers.d/devuser
+        sudo visudo -c -f /etc/sudoers.d/devuser   # MUST pass before continuing
+
+        # Verify the rule works correctly
+        sudo -l -U devuser
+        # Should list exactly one allowed command
+
+        # Write the audit
+        {
+          echo "=== USER IDENTITY ==="
+          id devuser
+          echo ""
+          echo "=== SUDO PERMISSIONS ==="
+          sudo -l -U devuser
+          echo ""
+          echo "=== HOME DIRECTORY ==="
+          ls -la /home/devuser/
+        } > /tmp/access-audit.txt
+
+        # Principle of least privilege check:
+        # devuser can restart myapp.service — nothing else sudo-able
+        # They cannot: sudo su, sudo bash, sudo cat /etc/shadow
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: devuser-exists
+      name: devuser Account Created
+      type: ssh
+      cmd: id devuser 2>/dev/null | grep -q "devuser"
+      failure_hint: "Run: sudo useradd -m -s /bin/bash devuser"
+
+    - id: devuser-in-devteam
+      name: devuser in devteam Group
+      type: ssh
+      cmd: id devuser 2>/dev/null | grep -q "devteam"
+      failure_hint: "Run: sudo groupadd devteam && sudo usermod -aG devteam devuser"
+
+    - id: sudoers-rule-exists
+      name: Targeted sudoers Rule Written
+      type: ssh
+      cmd: sudo -l -U devuser 2>/dev/null | grep -q "systemctl restart myapp.service"
+      failure_hint: "Write /etc/sudoers.d/devuser granting only: systemctl restart myapp.service"
+
+    - id: sudoers-file-valid
+      name: sudoers File Valid Syntax
+      type: ssh
+      cmd: sudo visudo -c -f /etc/sudoers.d/devuser 2>/dev/null | grep -q "parsed OK"
+      failure_hint: "Run: sudo visudo -c -f /etc/sudoers.d/devuser to check syntax"
+
+    - id: audit-written
+      name: Access Audit Written
+      type: ssh
+      cmd: test -s /tmp/access-audit.txt && test $(wc -l < /tmp/access-audit.txt) -ge 5
+      failure_hint: "Write the output of id devuser and sudo -l -U devuser to /tmp/access-audit.txt"
+
+completion_message: |
+  Least privilege is not a policy — it is a configuration.
+  A user who can restart one service cannot escalate to root through that command.
+  A user with full sudo can always escape to root. The gap between the two is
+  everything in security. Drop-in files under /etc/sudoers.d/ make these rules
+  auditable, reviewable, and removable without touching the main sudoers file.

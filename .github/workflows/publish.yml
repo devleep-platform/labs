@@ -1,0 +1,31 @@
+name: Publish Labs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'labs/**/*.yaml'
+
+jobs:
+  publish:
+    name: Sync Labs to Platform
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Validate all labs before sync
+        run: python scripts/validate_labs.py
+
+      - name: Sync to platform
+        run: python scripts/sync_labs.py
+        env:
+          LAB_SYNC_SECRET: ${{ secrets.LAB_SYNC_SECRET }}
+          PLATFORM_API_URL: ${{ vars.PLATFORM_API_URL }}

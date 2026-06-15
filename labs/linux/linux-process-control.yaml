@@ -1,0 +1,186 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-process-control
+title: "Process Control: Find, Signal, and Clean Up Processes Correctly"
+description: >
+  Inspect running processes by port, user, and CPU usage.
+  Send the right signals in the right order — and understand
+  why SIGTERM always comes before SIGKILL.
+
+track: linux
+module: linux-fundamentals
+sort_order: 60
+difficulty: beginner
+engineer_level: L1
+mode: guided
+
+tags:
+  - linux
+  - processes
+  - ps
+  - signals
+  - kill
+  - lsof
+  - fundamentals
+
+estimated_minutes: 40
+timeout_minutes: 80
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-server-orientation
+
+briefing:
+  severity: sev-4
+  impact: No production impact — skill lab
+  title: Process Management Task
+  narrative: |
+    You cannot debug a production system if you cannot navigate its process table.
+    ps, kill, lsof, and job control appear in every incident — finding what is
+    eating CPU, killing a stuck process without taking down its parent, reloading
+    a daemon without dropping connections. This lab covers the fundamentals.
+
+evidence:
+  - type: note
+    title: What you will practice
+    content: |
+      - lsof -i :PORT to find what owns a socket
+      - kill -HUP PID to reload a daemon config (not kill it)
+      - kill PID vs kill -9 PID — when each is appropriate
+
+objectives:
+  - Interpret every column in ps aux output including STAT codes
+  - Find a process by port, by name, and by CPU usage
+  - Send SIGTERM, SIGKILL, and SIGHUP — and know the difference
+  - Manage background jobs without losing track of them
+
+deliverables:
+  - path: /tmp/sleep-pid.txt
+    description: PID of the background sleep process you started
+  - path: /tmp/root-procs.txt
+    description: Top 10 root-owned processes sorted by CPU usage
+  - path: /tmp/sshd-info.txt
+    description: "PID:PROCESS_NAME for the process listening on port 22"
+  - path: /tmp/sleep-done.txt
+    description: Contains the word "terminated" after clean SIGTERM
+
+success_criteria:
+  - sleep 3600 started in background with PID written to /tmp/sleep-pid.txt
+  - /tmp/root-procs.txt contains at least 5 lines
+  - /tmp/sshd-info.txt contains PID:sshd format
+  - sleep process terminated cleanly with SIGTERM
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      ps aux shows all processes. Key columns: USER, PID, %CPU, %MEM, STAT, CMD.
+      STAT codes: R=running, S=sleeping, Z=zombie, D=disk wait, T=stopped.
+
+      Find by port:  ss -tlnp | grep :22
+      Find by name:  pgrep -l sshd
+      Sort by CPU:   ps aux --sort=-%cpu
+
+      Signals:
+        kill PID       = SIGTERM (15) — please exit cleanly
+        kill -9 PID    = SIGKILL — no choice, die now (cannot be caught)
+        kill -HUP PID  = SIGHUP  — reload config (for daemons)
+        kill -0 PID    = test if process exists (sends nothing)
+
+  - level: 2
+    text: |
+      Start background process:
+        sleep 3600 &
+        echo $! > /tmp/sleep-pid.txt     # $! = PID of last background job
+
+      Root processes by CPU:
+        ps aux --sort=-%cpu | awk 'NR==1 || $1=="root"' | head -11 > /tmp/root-procs.txt
+
+      Process on port 22:
+        PID=$(ss -tlnp | grep ':22 ' | grep -oP 'pid=\K[0-9]+' | head -1)
+        NAME=$(ps -p $PID -o comm= 2>/dev/null)
+        echo "${PID}:${NAME}" > /tmp/sshd-info.txt
+
+      Terminate cleanly:
+        kill $(cat /tmp/sleep-pid.txt)    # SIGTERM
+        sleep 1
+        ps -p $(cat /tmp/sleep-pid.txt) 2>/dev/null || echo "terminated" > /tmp/sleep-done.txt
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        sleep 3600 &
+        echo $! > /tmp/sleep-pid.txt
+        jobs                              # [1]+ Running sleep 3600
+
+        ps aux --sort=-%cpu | awk 'NR==1 || $1=="root"' | head -11 > /tmp/root-procs.txt
+
+        ss -tlnp | grep ':22 '
+        PID=$(ss -tlnp | grep ':22 ' | grep -oP 'pid=\K[0-9]+' | head -1)
+        NAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "sshd")
+        echo "${PID}:${NAME}" > /tmp/sshd-info.txt
+
+        # SIGHUP — sleep has no handler, stays running (that's expected)
+        kill -HUP $(cat /tmp/sleep-pid.txt)
+        ps -p $(cat /tmp/sleep-pid.txt)   # still there
+
+        # SIGTERM — clean exit
+        kill $(cat /tmp/sleep-pid.txt)
+        sleep 1
+        ps -p $(cat /tmp/sleep-pid.txt) 2>/dev/null \
+          || echo "terminated" > /tmp/sleep-done.txt
+
+        # Why not kill -9 first?
+        # SIGKILL prevents cleanup: open files stay dirty, locks stay held,
+        # temp files linger, databases may need recovery.
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: sleep-pid-written
+      name: Sleep PID Recorded
+      type: ssh
+      cmd: grep -qE '^[0-9]+' /tmp/sleep-pid.txt 2>/dev/null
+      failure_hint: "Run: sleep 3600 & ; echo $! > /tmp/sleep-pid.txt"
+
+    - id: root-procs-written
+      name: Root Process List Written
+      type: ssh
+      cmd: test -s /tmp/root-procs.txt && test $(wc -l < /tmp/root-procs.txt) -ge 5
+      failure_hint: "Run: ps aux --sort=-%cpu | awk 'NR==1 || $1==\"root\"' | head -11 > /tmp/root-procs.txt"
+
+    - id: sshd-info-written
+      name: SSHD Process Info Written
+      type: ssh
+      cmd: grep -qE '^[0-9]+:' /tmp/sshd-info.txt 2>/dev/null
+      failure_hint: "Use ss -tlnp | grep ':22' to find the PID, write PID:NAME to /tmp/sshd-info.txt"
+
+    - id: sleep-terminated
+      name: Sleep Terminated with SIGTERM
+      type: ssh
+      cmd: test -f /tmp/sleep-done.txt && grep -q "terminated" /tmp/sleep-done.txt
+      failure_hint: "Kill with SIGTERM: kill $(cat /tmp/sleep-pid.txt) then write 'terminated' to /tmp/sleep-done.txt"
+
+completion_message: |
+  SIGTERM gives the process a chance to clean up. SIGKILL does not.
+  Sending SIGKILL to a database or a web server mid-request can corrupt
+  open files, leave locks held, and require manual recovery.
+  Always send SIGTERM first. Only escalate to SIGKILL after a timeout with no response.

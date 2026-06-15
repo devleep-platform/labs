@@ -1,0 +1,112 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  last_updated: 2026-06-14
+
+id: docker-container-orientation
+title: "Container Orientation: Your First 5 Minutes with Docker"
+description: >
+  A Docker environment is running. Nothing is broken.
+  Establish what is here before anyone changes anything.
+
+track: docker
+module: docker-fundamentals
+sort_order: 10
+difficulty: beginner
+engineer_level: L1
+mode: guided
+
+tags:
+  - docker
+  - orientation
+  - fundamentals
+  - containers
+
+estimated_minutes: 25
+timeout_minutes: 45
+
+terraform_module: labs/docker-ec2
+scenario_id: docker-base
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites: []
+
+briefing:
+  severity: sev-4
+  impact: No production impact — orientation task
+  title: Docker Environment Baseline
+  narrative: |
+    You have been given access to a host running Docker.
+    A container is already running. Nobody documented what it does.
+    Before anyone touches it: establish facts.
+
+objectives:
+  - List all running containers and understand their state
+  - Inspect a container's configuration (ports, env, mounts)
+  - Read container logs
+  - Understand image layers and tags
+
+success_criteria:
+  - Can identify the running container name and image
+  - Can read logs from the running container
+  - Can identify which host port the container is bound to
+  - Completes /tmp/docker-baseline.txt with required fields
+
+deliverables:
+  - path: /tmp/docker-baseline.txt
+    description: |
+      A baseline report containing:
+        - Container name and image
+        - Port mapping
+        - Container uptime
+
+hints:
+  - level: 1
+    text: |
+      Four questions to answer first:
+        What is running?   docker ps
+        What image?        docker inspect <name>
+        What logs?         docker logs <name>
+        What ports?        docker port <name>
+
+  - level: 2
+    text: |
+      docker ps
+      docker inspect webserver
+      docker logs webserver
+      docker port webserver
+
+      Write the baseline:
+        {
+          echo "CONTAINER: $(docker ps --format '{{.Names}}')"
+          echo "IMAGE: $(docker ps --format '{{.Image}}')"
+          echo "PORTS: $(docker ps --format '{{.Ports}}')"
+          echo "UPTIME: $(docker ps --format '{{.Status}}')"
+        } > /tmp/docker-baseline.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: container-running
+      name: Container Is Running
+      type: ssh
+      cmd: docker ps --filter "status=running" | grep -q webserver
+      failure_hint: Run docker ps to see running containers
+
+    - id: baseline-written
+      name: Baseline File Written
+      type: ssh
+      cmd: test -s /tmp/docker-baseline.txt && grep -qi "container\|image\|port" /tmp/docker-baseline.txt
+      failure_hint: Write container name, image, and port mapping to /tmp/docker-baseline.txt
+
+completion_message: |
+  Knowing what is running before touching a system prevents the most common
+  Docker incident: stopping the wrong container in production.

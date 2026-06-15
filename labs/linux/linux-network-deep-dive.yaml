@@ -1,0 +1,235 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-network-deep-dive
+title: "Network Administration: Interfaces, Routing, DNS, and Firewalls"
+description: >
+  Audit network interfaces and routing, diagnose DNS resolution, identify
+  what is listening on which ports, and configure a firewall rule —
+  the four tasks that appear in every production network incident.
+
+track: linux
+module: linux-administration
+sort_order: 160
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - networking
+  - ip
+  - ss
+  - iptables
+  - ufw
+  - dns
+  - routing
+  - administration
+
+estimated_minutes: 50
+timeout_minutes: 100
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-server-orientation
+
+briefing:
+  severity: sev-4
+  impact: No production impact — administration task
+  title: Network Audit Required
+  narrative: |
+    Before deploying anything to a server you need to understand its network
+    topology: which interfaces exist, what the routing table says, whether DNS
+    resolves correctly, what is already listening on which ports, and what
+    the firewall allows. This lab builds that baseline competency.
+
+evidence:
+  - type: note
+    title: Task list
+    content: |
+      1. Audit interfaces and routing table
+      2. Diagnose DNS resolution path
+      3. Map all listening ports to their processes
+      4. Allow port 8080 through the firewall
+      5. Document everything in /tmp/network-audit.txt
+
+objectives:
+  - Read interface configuration with ip addr and ip link
+  - Trace the routing table and understand the default gateway
+  - Diagnose DNS resolution using dig and /etc/resolv.conf
+  - Map every listening port to its owning process with ss -tlnp
+  - Add a firewall allow rule and verify it
+
+deliverables:
+  - path: /tmp/network-audit.txt
+    description: |
+      Network audit containing:
+        - Interface list with IPs (ip addr)
+        - Routing table (ip route)
+        - DNS resolver config (/etc/resolv.conf)
+        - All listening ports with process names (ss -tlnp)
+        - Firewall status showing port 8080 allowed
+  - path: /tmp/dns-trace.txt
+    description: |
+      DNS diagnostic containing:
+        - dig google.com output showing query path and answer
+        - dig @8.8.8.8 google.com showing direct DNS query
+        - Contents of /etc/resolv.conf
+
+success_criteria:
+  - /tmp/network-audit.txt written with all five sections
+  - /tmp/dns-trace.txt documents the DNS resolution path
+  - Port 8080 allowed through the firewall (ufw or iptables)
+  - ss -tlnp output captured showing listening ports with PIDs
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      Modern Linux networking uses iproute2 (ip command), not ifconfig/netstat.
+        ip addr           — interface IPs (replace ifconfig)
+        ip route          — routing table (replace route -n)
+        ss -tlnp          — listening TCP sockets with PIDs (replace netstat -tlnp)
+        ip link           — interface state (UP/DOWN)
+
+      DNS resolution order is in /etc/nsswitch.conf.
+      /etc/resolv.conf shows which DNS servers are used.
+      dig traces the exact query path.
+
+      ufw is Ubuntu's firewall frontend. iptables is the underlying engine.
+
+  - level: 2
+    text: |
+      Interfaces and routing:
+        ip addr show
+        ip route show
+        ip route get 8.8.8.8        # which interface would reach this IP?
+
+      DNS:
+        cat /etc/resolv.conf
+        dig google.com              # full query trace
+        dig @8.8.8.8 google.com     # bypass local resolver, query Google directly
+        resolvectl status 2>/dev/null || systemd-resolve --status
+
+      Listening ports:
+        ss -tlnp
+        ss -tlnp | awk 'NR>1{print $4, $NF}' | column -t
+
+      Firewall:
+        sudo ufw status verbose     # if ufw is active
+        sudo ufw allow 8080/tcp
+        sudo ufw status | grep 8080
+
+      Audit:
+        {
+          echo "=== INTERFACES ==="
+          ip addr show
+          echo "=== ROUTING ==="
+          ip route show
+          echo "=== LISTENING PORTS ==="
+          ss -tlnp
+          echo "=== FIREWALL ==="
+          sudo ufw status verbose 2>/dev/null || sudo iptables -L INPUT -n
+        } > /tmp/network-audit.txt
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        # Interfaces
+        ip addr show                # all interfaces with IPs
+        ip link show                # link state (UP/DOWN/LOWER_UP)
+        ip -4 addr show eth0        # IPv4 only on eth0
+        ip route show               # routing table
+        ip route get 1.1.1.1        # which route handles this destination?
+
+        # DNS diagnostics
+        cat /etc/resolv.conf        # configured nameservers
+        cat /etc/nsswitch.conf | grep hosts  # resolution order
+        dig google.com              # full DNS query — note the SERVER line
+        dig @8.8.8.8 google.com     # bypass local resolver
+        dig +short google.com       # just the answer
+
+        {
+          echo "=== /etc/resolv.conf ==="
+          cat /etc/resolv.conf
+          echo "=== dig google.com ==="
+          dig google.com | grep -E "^;|ANSWER|google.com"
+          echo "=== Direct query via 8.8.8.8 ==="
+          dig @8.8.8.8 google.com +short
+        } > /tmp/dns-trace.txt
+
+        # Listening ports mapped to processes
+        ss -tlnp
+        # PID is in the last column: users:(("sshd",pid=1234,fd=3))
+        ss -tlnp | grep -oP 'pid=\K[0-9]+' | xargs -I{} ps -p {} -o pid,comm= 2>/dev/null
+
+        # Firewall
+        sudo ufw status verbose 2>/dev/null
+        sudo ufw allow 8080/tcp
+        sudo ufw status verbose | grep 8080
+
+        # Full audit
+        {
+          echo "=== INTERFACES ==="
+          ip addr show
+          echo "=== ROUTING TABLE ==="
+          ip route show
+          echo "=== DNS CONFIG ==="
+          cat /etc/resolv.conf
+          echo "=== LISTENING PORTS ==="
+          ss -tlnp
+          echo "=== FIREWALL STATUS ==="
+          sudo ufw status verbose 2>/dev/null || sudo iptables -L INPUT -n --line-numbers
+        } > /tmp/network-audit.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: network-audit-written
+      name: Network Audit Written
+      type: ssh
+      cmd: test -s /tmp/network-audit.txt && test $(wc -l < /tmp/network-audit.txt) -ge 15
+      failure_hint: "Write ip addr, ip route, ss -tlnp, and firewall status to /tmp/network-audit.txt"
+
+    - id: dns-trace-written
+      name: DNS Trace Written
+      type: ssh
+      cmd: test -s /tmp/dns-trace.txt && grep -q "resolv.conf" /tmp/dns-trace.txt
+      failure_hint: "Write /etc/resolv.conf contents and dig google.com output to /tmp/dns-trace.txt"
+
+    - id: listening-ports-captured
+      name: Listening Ports Captured
+      type: ssh
+      cmd: grep -q "LISTEN" /tmp/network-audit.txt 2>/dev/null
+      failure_hint: "Run: ss -tlnp and include the output in /tmp/network-audit.txt"
+
+    - id: port-8080-allowed
+      name: Port 8080 Allowed in Firewall
+      type: ssh
+      cmd: sudo ufw status 2>/dev/null | grep -q "8080" || sudo iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null
+      failure_hint: "Run: sudo ufw allow 8080/tcp"
+
+completion_message: |
+  ip, ss, and dig replaced ifconfig, netstat, and nslookup over a decade ago.
+  If you are still using the old tools they are missing on minimal images and
+  containers. Learn the iproute2 equivalents — they are more powerful and
+  give you information the old tools never showed.
+  The firewall is always the last thing to check when a service is unreachable —
+  but the first thing blamed. Check ss first to confirm the service is actually listening.

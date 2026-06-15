@@ -1,0 +1,267 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-ssl-tls
+title: "TLS Incident: Renew an Expired Certificate and Restore HTTPS"
+description: >
+  HTTPS is down because the TLS certificate expired. Diagnose the certificate
+  state, understand what expired and when, renew or replace it, reload the
+  web server, and write an incident report covering detection, impact, and prevention.
+
+track: linux
+module: linux-incident-response
+sort_order: 240
+difficulty: advanced
+engineer_level: L3
+mode: incident
+
+tags:
+  - linux
+  - ssl
+  - tls
+  - openssl
+  - certificate
+  - nginx
+  - https
+  - incident
+  - incident-response
+
+estimated_minutes: 55
+timeout_minutes: 110
+
+terraform_module: labs/linux-ec2
+scenario_id: cert-expired
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-ssh-mastery
+  - linux-network-deep-dive
+
+briefing:
+  severity: sev-1
+  impact: HTTPS completely down — all users receiving certificate error
+  title: Certificate Expired — HTTPS Down
+  narrative: |
+    At 00:00 UTC all HTTPS traffic to the production web server started returning
+    a certificate error. The certificate expired. Monitoring did not catch it.
+    The site is inaccessible to all users. Revenue is stopped.
+    You need to restore HTTPS now and ensure this never happens again.
+  incident:
+    detected_at: "2026-03-15T00:03:00Z"
+    severity: sev-1
+    impacted_services: [web, api, customers]
+
+evidence:
+  - type: pagerduty
+    title: "P1: prod-web-01 HTTPS health check FAILED — certificate error"
+    content: |
+      Health check URL: https://app.example.com/health
+      Error: SSL_ERROR_RX_RECORD_TOO_LONG / certificate expired
+      First failure: 00:00:12 UTC
+      Duration: 18 minutes and counting
+  - type: slack
+    title: "#incidents — customer reports"
+    content: |
+      user-support: customers reporting "your certificate expired"
+      cto: how did we not have an alert on this?
+      on-call: working on it now
+
+objectives:
+  - Use openssl to inspect the expired certificate and understand what failed
+  - Renew or replace the certificate
+  - Verify the new certificate with openssl before reloading
+  - Reload the web server and confirm HTTPS is working
+  - Write an incident report covering timeline, root cause, and prevention
+
+deliverables:
+  - path: /tmp/cert-diagnosis.txt
+    description: |
+      Certificate inspection output:
+        - openssl x509 output showing expiry date
+        - The CN/SAN names the certificate covers
+        - How long it has been expired
+  - path: /tmp/incident-report.txt
+    description: |
+      Incident report with:
+        - Detection: when it was noticed and by whom
+        - Impact: duration and blast radius
+        - Root cause: why the cert was not renewed before expiry
+        - Fix: what was done to restore HTTPS
+        - Prevention: alerting and renewal automation steps to add
+
+success_criteria:
+  - HTTPS is restored (web server serving valid certificate)
+  - New certificate has expiry more than 30 days in the future
+  - /tmp/cert-diagnosis.txt documents the expired certificate details
+  - /tmp/incident-report.txt covers all five sections
+  - Web server reloaded without errors
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      You cannot fix a certificate without first understanding what it covers.
+
+      Before touching any files:
+        - What is the current certificate's expiry date?
+        - What hostnames (CN and SAN) does it cover?
+        - Where does the web server config point to the certificate file?
+        - Is this a self-signed cert, a Let's Encrypt cert, or a commercial cert?
+
+      The answers determine the renewal path.
+
+  - level: 2
+    text: |
+      Inspect the certificate:
+        openssl x509 -in /etc/ssl/certs/server.crt -noout -text | grep -E "Not After|Subject|DNS:"
+        openssl x509 -in /etc/ssl/certs/server.crt -noout -dates
+        # Check via live connection:
+        echo | openssl s_client -connect localhost:443 2>/dev/null | openssl x509 -noout -dates
+
+      Find where the web server references the cert:
+        grep -r "ssl_certificate\|SSLCertificateFile" /etc/nginx/ /etc/apache2/ 2>/dev/null
+
+      Generate a new self-signed certificate (for lab/recovery):
+        sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/ssl/private/server.key \
+          -out /etc/ssl/certs/server.crt \
+          -subj "/CN=app.example.com"
+
+      Verify before reloading:
+        openssl x509 -in /etc/ssl/certs/server.crt -noout -dates
+        sudo nginx -t
+
+      Reload:
+        sudo systemctl reload nginx
+
+  - level: 3
+    text: |
+      Full procedure:
+
+        # 1. Diagnose — document before touching
+        {
+          echo "=== CURRENT CERTIFICATE ==="
+          openssl x509 -in /etc/ssl/certs/server.crt -noout -text 2>/dev/null | \
+            grep -E "Not After|Not Before|Subject:|DNS:"
+          echo ""
+          echo "=== EXPIRY DATES ==="
+          openssl x509 -in /etc/ssl/certs/server.crt -noout -dates 2>/dev/null
+        } | sudo tee /tmp/cert-diagnosis.txt
+
+        # 2. Locate cert in web server config
+        sudo grep -r "ssl_certificate\b" /etc/nginx/ 2>/dev/null | head -5
+
+        # 3. Generate a new self-signed cert (365 days)
+        sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/ssl/private/server.key \
+          -out /etc/ssl/certs/server.crt \
+          -subj "/C=US/ST=State/L=City/O=Example/CN=app.example.com"
+
+        # 4. Verify the new cert
+        openssl x509 -in /etc/ssl/certs/server.crt -noout -dates
+        sudo nginx -t 2>&1
+
+        # 5. Reload web server
+        sudo systemctl reload nginx
+
+        # 6. Verify HTTPS from the server
+        echo | openssl s_client -connect localhost:443 2>/dev/null | \
+          openssl x509 -noout -dates
+
+        # 7. Write the incident report
+        cat > /tmp/incident-report.txt << 'EOF'
+        === INCIDENT REPORT: Certificate Expiry — prod-web-01 ===
+
+        DETECTION
+        Detected by: PagerDuty health check at 00:00 UTC
+        Notified at: 00:03 UTC
+
+        IMPACT
+        Duration: [X] minutes of HTTPS downtime
+        Blast radius: All users of app.example.com
+
+        ROOT CAUSE
+        Certificate was not renewed before expiry.
+        No expiry monitoring alert existed.
+        Manual renewal process with no automation.
+
+        FIX
+        Replaced expired certificate with new cert.
+        Reloaded nginx. HTTPS restored.
+
+        PREVENTION
+        1. Add certificate expiry monitoring (alert at 30 days before expiry)
+        2. Automate renewal with certbot
+        3. Add cert expiry check to deployment checklist
+        EOF
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: cert-diagnosis-written
+      name: Certificate Diagnosis Documented
+      type: multi_check
+      operator: all
+      checks:
+        - id: file-exists
+          type: ssh
+          cmd: test -s /tmp/cert-diagnosis.txt
+          failure_hint: Run openssl x509 on the certificate and write output to /tmp/cert-diagnosis.txt
+        - id: has-dates
+          type: ssh
+          cmd: grep -qi "not after\|expir\|date" /tmp/cert-diagnosis.txt
+          failure_hint: Include the certificate expiry date in /tmp/cert-diagnosis.txt
+
+    - id: cert-valid
+      name: Certificate Not Expired
+      type: ssh
+      cmd: |
+        CERT=/etc/ssl/certs/server.crt
+        [ -f "$CERT" ] && openssl x509 -in "$CERT" -noout -checkend 2592000 2>/dev/null
+      failure_hint: "The certificate is still expired or missing. Renew it: openssl req -x509 -nodes -days 365 ..."
+
+    - id: webserver-running
+      name: Web Server Running
+      type: ssh
+      cmd: systemctl is-active nginx 2>/dev/null || systemctl is-active apache2 2>/dev/null
+      failure_hint: "Reload nginx after replacing the certificate: sudo systemctl reload nginx"
+
+    - id: incident-report-written
+      name: Incident Report Written
+      type: multi_check
+      operator: all
+      checks:
+        - id: file-exists
+          type: ssh
+          cmd: test -s /tmp/incident-report.txt
+          failure_hint: Write the incident report to /tmp/incident-report.txt
+        - id: has-prevention
+          type: ssh
+          cmd: grep -qi "prevent\|automat\|monitor\|alert\|certbot" /tmp/incident-report.txt
+          failure_hint: Incident report must include prevention steps
+        - id: has-sections
+          type: ssh
+          cmd: grep -qi "detection\|impact\|root cause\|fix" /tmp/incident-report.txt
+          failure_hint: Incident report must cover detection, impact, root cause, and fix
+
+completion_message: |
+  Certificate expiry is one of the most preventable causes of outage.
+  openssl x509 -noout -checkend 2592000 returns exit code 1 if the cert
+  expires within 30 days — trivially scriptable as a cron check.
+  certbot renews Let's Encrypt certs automatically.
+  cert-manager does the same in Kubernetes.
+  The failure here was process, not technology: no monitoring, no automation.
+  An outage without a monitoring change as a follow-up is not actually resolved.

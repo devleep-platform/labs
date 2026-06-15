@@ -1,0 +1,116 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  last_updated: 2026-06-14
+
+id: docker-container-wont-start
+title: "Container Won't Start"
+description: >
+  A container keeps exiting immediately after launch.
+  No error is obvious from docker ps. Find out why and fix it.
+
+track: docker
+module: docker-fundamentals
+sort_order: 20
+difficulty: beginner
+engineer_level: L1
+mode: break-fix
+
+tags:
+  - docker
+  - debugging
+  - entrypoint
+  - containers
+
+estimated_minutes: 30
+timeout_minutes: 60
+
+terraform_module: labs/docker-ec2
+scenario_id: docker-container-wont-start
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - docker-container-orientation
+
+briefing:
+  severity: sev-2
+  impact: Service unavailable — container exits on every start attempt
+  title: broken-app Container Crash Loop
+  narrative: |
+    The on-call alert fired 10 minutes ago.
+    The 'broken-app' container is in a restart loop and never becomes healthy.
+    The previous engineer said "it was working yesterday."
+    You have the terminal. Figure out what changed.
+
+objectives:
+  - Identify why the container is exiting
+  - Read exit codes and logs to understand the failure
+  - Fix the container so it stays running
+
+success_criteria:
+  - Root cause identified (bad entrypoint / missing binary)
+  - A fixed container named fixed-app is running and stable
+  - Container uptime is at least 30 seconds
+
+hints:
+  - level: 1
+    text: |
+      Start here:
+        docker ps -a               # see all containers including stopped ones
+        docker logs broken-app     # read the crash output
+        docker inspect broken-app  # see the full config
+
+  - level: 2
+    text: |
+      The exit code tells you a lot:
+        Exit 127 = command not found (entrypoint binary doesn't exist)
+        Exit 1   = application error
+        Exit 137 = killed (OOM or docker stop)
+
+      Check what the container tried to run:
+        docker inspect broken-app | grep -A5 Cmd
+        docker inspect broken-app | grep -A5 Entrypoint
+
+  - level: 3
+    text: |
+      The image CMD points to /app/start.sh which doesn't exist.
+      Override the entrypoint when running the fixed version:
+
+        docker run -d \
+          --name fixed-app \
+          broken-app:latest \
+          /bin/sh -c "echo 'App running' && sleep infinity"
+
+      Or build a corrected image with a valid CMD.
+
+validation:
+  strategy: all
+  default_timeout_seconds: 10
+  checks:
+    - id: fixed-container-running
+      name: Fixed Container Is Running
+      type: ssh
+      cmd: docker ps --filter "name=fixed-app" --filter "status=running" | grep -q fixed-app
+      failure_hint: Run a fixed container named fixed-app that stays up
+
+    - id: container-stable
+      name: Container Has Been Running 30+ Seconds
+      type: ssh
+      cmd: |
+        started=$(docker inspect fixed-app --format '{{.State.StartedAt}}' 2>/dev/null)
+        started_epoch=$(date -d "$started" +%s 2>/dev/null || date -jf "%Y-%m-%dT%H:%M:%S" "${started%.*}" +%s 2>/dev/null)
+        now=$(date +%s)
+        [ $((now - started_epoch)) -ge 30 ]
+      failure_hint: The container must stay running for at least 30 seconds
+
+completion_message: |
+  Exit code 127 is one of the most common container failures.
+  It always means the process the container tried to execute doesn't exist
+  in the image — usually a missing binary, wrong path, or stale entrypoint.

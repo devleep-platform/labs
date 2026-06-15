@@ -1,0 +1,125 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  last_updated: 2026-06-14
+
+id: docker-volume-not-mounted
+title: "Volume Not Mounted"
+description: >
+  A web server is running but serving the wrong content.
+  Users see the default nginx welcome page instead of the real site.
+  The files exist on the host — the container just can't see them.
+
+track: docker
+module: docker-fundamentals
+sort_order: 50
+difficulty: beginner
+engineer_level: L1
+mode: break-fix
+
+tags:
+  - docker
+  - volumes
+  - mounts
+  - nginx
+  - storage
+
+estimated_minutes: 30
+timeout_minutes: 60
+
+terraform_module: labs/docker-ec2
+scenario_id: docker-volume-not-mounted
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - docker-wrong-port-mapping
+
+briefing:
+  severity: sev-2
+  impact: Website serving incorrect default content to all users
+  title: Wrong Content Served at Port 8080
+  narrative: |
+    Multiple users reported the site shows "Welcome to nginx!" instead of
+    the application. The container is running. Port 8080 is reachable.
+    But the content is wrong. The deploy engineer is on PTO.
+    You have the host. Find out why the wrong content is being served and fix it.
+
+objectives:
+  - Understand the difference between the host filesystem and the container filesystem
+  - Locate the real site files on the host
+  - Re-run the container with the correct volume mount so it serves the right content
+
+success_criteria:
+  - curl http://localhost:8080 returns content containing "Devleep is live"
+  - The container is named webserver and running with /opt/site mounted to /usr/share/nginx/html
+
+hints:
+  - level: 1
+    text: |
+      Start by reading the README and checking what's actually on the host:
+        cat /home/student/README.txt
+        ls /opt/site
+        curl http://localhost:8080   # note the wrong content
+
+  - level: 2
+    text: |
+      You cannot add a volume mount to a running container.
+      Stop and remove it, then re-run with the -v flag:
+
+        docker stop webserver && docker rm webserver
+        docker run -d \
+          --name webserver \
+          -p 8080:80 \
+          -v /opt/site:/usr/share/nginx/html:ro \
+          nginx:latest
+
+      Then verify:
+        curl http://localhost:8080
+
+  - level: 3
+    text: |
+      Full fix:
+        docker stop webserver && docker rm webserver
+        docker run -d \
+          --name webserver \
+          --restart unless-stopped \
+          -p 8080:80 \
+          -v /opt/site:/usr/share/nginx/html:ro \
+          nginx:latest
+
+        curl http://localhost:8080   # should return "Devleep is live"
+
+validation:
+  strategy: all
+  default_timeout_seconds: 10
+  checks:
+    - id: correct-content-served
+      name: Port 8080 Serves Correct Content
+      type: ssh
+      cmd: curl -sf http://localhost:8080 | grep -q "Devleep is live"
+      failure_hint: Re-run the container with -v /opt/site:/usr/share/nginx/html:ro
+
+    - id: volume-mounted
+      name: /opt/site Is Mounted Into the Container
+      type: ssh
+      cmd: docker inspect webserver --format '{{json .Mounts}}' | grep -q "/opt/site"
+      failure_hint: The container must have /opt/site mounted — check your -v flag
+
+    - id: webserver-running
+      name: Container Named webserver Is Running
+      type: ssh
+      cmd: docker ps --filter "name=webserver" --filter "status=running" | grep -q webserver
+      failure_hint: Make sure the container is named webserver and running
+
+completion_message: |
+  Volume mounts are how containers read files from the host at runtime.
+  Without them, the container only sees what was baked into the image.
+  This is the #1 cause of "it works on my machine but not in production" —
+  different content on the host means the container serves different things.

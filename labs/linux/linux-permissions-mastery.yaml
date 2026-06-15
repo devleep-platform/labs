@@ -1,0 +1,185 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-permissions-mastery
+title: "Permissions: Restore a Web Service Broken by a Bad chown"
+description: >
+  A recursive chown swept across /var/www/html and broke nginx.
+  Read the error logs to confirm the cause, then fix ownership and permissions
+  to restore service — without restarting the server.
+
+track: linux
+module: linux-fundamentals
+sort_order: 30
+difficulty: beginner
+engineer_level: L1
+mode: incident
+
+tags:
+  - linux
+  - permissions
+  - chmod
+  - chown
+  - nginx
+  - incident
+  - fundamentals
+
+estimated_minutes: 40
+timeout_minutes: 90
+
+terraform_module: labs/linux-ec2
+scenario_id: permission-chaos
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-filesystem-anatomy
+
+briefing:
+  severity: sev-2
+  impact: Web service returning 500 on all endpoints
+  title: Permission Chaos Detected
+  narrative: |
+    A junior engineer ran sudo chown -R root:root /var/www/html.
+    nginx runs as www-data and can no longer read any files.
+    Every request returns 500. The fix is purely permissions —
+    no code changes, no config edits, no restarts until you understand what broke.
+  incident:
+    detected_at: "2026-01-15T14:23:00Z"
+    severity: sev-2
+    impacted_services: [web]
+
+evidence:
+  - type: slack
+    title: "#ops-alerts"
+    content: |
+      [automated] ALERT: prod-web-01 HTTP 500 on all endpoints
+      Rate: 100% of requests failing — first seen 14:23 UTC
+      Last manual change: 14:18 UTC (chown by jenkins-bot)
+  - type: note
+    title: Note from previous engineer
+    content: |
+      I ran: sudo chown -R root:root /var/www/html
+      nginx runs as www-data — I think this was a mistake.
+      Do NOT restart the full server.
+
+objectives:
+  - Read permission bits in octal and symbolic notation without looking things up
+  - Use logs, stat, and ls -l to diagnose why a process cannot access a file
+  - Fix ownership and permissions with targeted commands — no broad guesswork
+  - Understand setuid, setgid, and sticky bit
+
+deliverables:
+  - path: /tmp/diagnosis.txt
+    description: |
+      One-line diagnosis: which file/directory is blocking nginx and why.
+      Example: "/var/www/html owned by root:root, nginx runs as www-data — cannot read"
+
+success_criteria:
+  - nginx error logs confirm "Permission denied"
+  - /tmp/diagnosis.txt documents the root cause
+  - /var/www/html owned by www-data:www-data
+  - nginx reloaded and returning HTTP 200
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      nginx runs as www-data. If files under /var/www/html are owned by root
+      with no group read bit, nginx cannot open them — result is 500.
+
+      Read the logs before touching anything.
+      Confirm the exact error. Never guess at permission fixes.
+
+  - level: 2
+    text: |
+      Read the error:
+        sudo tail -20 /var/log/nginx/error.log
+        sudo journalctl -u nginx -n 20
+
+      Identify what nginx runs as:
+        grep "^user" /etc/nginx/nginx.conf
+        ps aux | grep "nginx: worker"
+
+      Check current ownership:
+        ls -la /var/www/html/
+        stat /var/www/html/index.html
+
+      Fix and reload (not restart):
+        sudo chown -R www-data:www-data /var/www/html
+        sudo chmod 755 /var/www/html
+        sudo nginx -t && sudo systemctl reload nginx
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        # 1. Read logs — confirm the actual error before changing anything
+        sudo tail -30 /var/log/nginx/error.log
+        # Expected: "open() ... failed (13: Permission denied)"
+
+        # 2. Confirm nginx worker user
+        grep -r "^user" /etc/nginx/nginx.conf /etc/nginx/conf.d/ 2>/dev/null
+        ps aux | grep "nginx: worker"
+
+        # 3. Check ownership
+        ls -la /var/www/html/
+        stat /var/www/html/index.html    # look at "Access:" line
+
+        # 4. Document the diagnosis
+        echo "/var/www/html owned by root:root, nginx runs as www-data" > /tmp/diagnosis.txt
+
+        # 5. Fix ownership and permissions
+        sudo chown -R www-data:www-data /var/www/html
+        sudo find /var/www/html -type d -exec chmod 755 {} \;
+        sudo find /var/www/html -type f -exec chmod 644 {} \;
+
+        # 6. Verify config then reload gracefully
+        sudo nginx -t 2>&1
+        sudo systemctl reload nginx
+        curl -s -o /dev/null -w "%{http_code}\n" http://localhost/   # expect 200
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: diagnosis-written
+      name: Diagnosis Documented
+      type: ssh
+      cmd: test -s /tmp/diagnosis.txt
+      failure_hint: Write the root cause to /tmp/diagnosis.txt before fixing
+
+    - id: html-owned-correctly
+      name: /var/www/html Owned by www-data
+      type: ssh
+      cmd: test "$(stat -c '%U:%G' /var/www/html 2>/dev/null)" = "www-data:www-data"
+      failure_hint: "Run: sudo chown -R www-data:www-data /var/www/html"
+
+    - id: html-permissions-correct
+      name: /var/www/html Permissions 755
+      type: ssh
+      cmd: test "$(stat -c '%a' /var/www/html 2>/dev/null)" = "755"
+      failure_hint: "Run: sudo chmod 755 /var/www/html"
+
+    - id: nginx-serving-200
+      name: nginx Serving HTTP 200
+      type: ssh
+      cmd: curl -s -o /dev/null -w "%{http_code}" http://localhost/ 2>/dev/null | grep -q "^200"
+      failure_hint: "Test config first: sudo nginx -t then sudo systemctl reload nginx"
+
+completion_message: |
+  Never run chown -R without knowing what user the service runs as.
+  The diagnosis-before-fix habit prevents the second mistake: choosing the wrong fix.
+  Reload, not restart — reload sends SIGHUP and nginx drains existing connections
+  gracefully. Restart drops them.

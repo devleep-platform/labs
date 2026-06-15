@@ -1,0 +1,333 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-incident-gauntlet
+title: "Incident Gauntlet: Triage and Resolve a Multi-System Cascade Failure"
+description: >
+  Three systems have failed simultaneously. The disk is full, a critical service
+  is down, and a misconfigured deployment is serving errors. This is the capstone
+  incident lab — no hints on the first pass, no pre-defined order of resolution.
+  Triage, prioritize, and work through the failures like a production incident.
+
+track: linux
+module: linux-incident-response
+sort_order: 170
+difficulty: advanced
+engineer_level: L3
+mode: incident
+
+tags:
+  - linux
+  - incident
+  - incident-response
+  - triage
+  - capstone
+  - disk
+  - service-failure
+  - deployment
+  - cascade
+
+estimated_minutes: 90
+timeout_minutes: 180
+
+terraform_module: labs/linux-ec2
+scenario_id: gauntlet
+
+environment:
+  instance_type: t3.small
+  estimated_cost: "$0.02"
+  aws_services:
+    - ec2
+    - ebs
+
+prerequisites:
+  - linux-performance-analysis
+  - linux-logrotate
+  - linux-ssl-tls
+
+briefing:
+  severity: sev-1
+  impact: Full production outage — disk full, primary service down, new deployment broken
+  title: Multiple System Failures — Cascade
+  narrative: |
+    03:47 UTC. Three alerts fired within 90 seconds of each other.
+    This is either a cascade failure or a catastrophic deployment.
+    You are the only engineer on call. You need to:
+      1. Triage — understand what is broken and in what order to fix it
+      2. Execute — work through each failure systematically
+      3. Restore — get the system to a stable state
+      4. Document — write a timeline and root cause analysis
+
+    There is no playbook that covers all three simultaneously.
+    Work the problem.
+  incident:
+    detected_at: "2026-06-01T03:47:00Z"
+    severity: sev-1
+    impacted_services: [web, api, database, disk]
+
+evidence:
+  - type: pagerduty
+    title: "P1: Disk 100% on / — write errors"
+    content: |
+      Host: prod-app-01
+      Disk: / at 100%
+      Write errors appearing in app log
+      Triggered: 03:47:12 UTC
+  - type: pagerduty
+    title: "P1: api.service crashed — not restarting"
+    content: |
+      Service: api.service
+      Status: failed (inactive)
+      Last exit: code=exited, status=1
+      Restart attempts: 3 (limit reached, not retrying)
+      Triggered: 03:47:38 UTC
+  - type: pagerduty
+    title: "P1: HTTP 502 on all web endpoints"
+    content: |
+      Health check: FAIL
+      Response code: 502 Bad Gateway
+      nginx: running
+      Upstream: api.service — dead
+      Triggered: 03:48:01 UTC
+  - type: slack
+    title: "#incidents — 03:48 UTC"
+    content: |
+      CTO: three P1s in 90 seconds — what is happening?
+      on-call: assessing now
+      dev-lead: we deployed v2.4.1 at 03:40 — could this be the cause?
+      on-call: investigating
+
+objectives:
+  - Assess all three failures and establish triage priority
+  - Fix disk space issue first (blocking all other writes and logs)
+  - Restore api.service (primary outage cause)
+  - Fix nginx upstream or rollback deployment causing 502s
+  - Write a post-incident timeline and root cause analysis
+
+deliverables:
+  - path: /tmp/triage.txt
+    description: |
+      Triage assessment written before fixing anything:
+        - Three issues identified with initial assessment of each
+        - Prioritization order with reasoning
+        - Hypothesis for what caused the cascade
+  - path: /tmp/incident-timeline.txt
+    description: |
+      Timeline of events and actions:
+        - 03:47: alerts fired
+        - What was investigated and when
+        - What was fixed and at what time
+        - When each service was restored
+  - path: /tmp/rca.txt
+    description: |
+      Root cause analysis:
+        - What was the trigger (deployment? cron job? traffic spike?)
+        - How did one failure lead to the others
+        - What broke the cascade containment
+        - What changes prevent recurrence
+
+success_criteria:
+  - Disk usage on / below 80%
+  - api.service active and running
+  - HTTP health check returning 200 (not 502)
+  - /tmp/triage.txt written with priority ordering
+  - /tmp/incident-timeline.txt covers all three failures
+  - /tmp/rca.txt identifies root cause and prevention
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      Three failures. One of them is probably the root cause of the other two.
+      Before touching anything, spend 3 minutes understanding the dependency chain:
+
+        - Can api.service log anything if the disk is full?
+        - Can nginx return 200 if api.service is dead?
+        - Did the deployment at 03:40 introduce a bug that causes api.service to crash?
+
+      Order matters. Fixing nginx while api.service is dead and disk is full
+      is wasted effort. Fix in dependency order:
+        1. Disk (blocks everything)
+        2. api.service (primary service)
+        3. nginx upstream / deployment issue (downstream)
+
+      Write your triage assessment to /tmp/triage.txt before you start fixing.
+      Chaos is managed with process, not speed.
+
+  - level: 2
+    text: |
+      DISK ISSUE:
+        df -h /
+        du -sh /* 2>/dev/null | sort -rh | head -10    # find what is filling the disk
+        du -sh /var/log/* | sort -rh | head -10          # logs are the usual culprit
+        # Quick recovery: compress or remove old logs
+        sudo find /var/log -name "*.log" -size +100M -exec ls -lh {} \;
+        sudo logrotate --force /etc/logrotate.conf
+        # Or: find and remove old log files
+        sudo find /var/log -name "*.log.*" -mtime +7 -delete
+
+      API SERVICE:
+        sudo systemctl status api.service --no-pager
+        sudo journalctl -u api.service -n 50 --no-pager
+        # If it exited with status=1 after deployment:
+        sudo systemctl cat api.service | grep ExecStart    # what binary?
+        # Check if the binary exists:
+        ls -la /opt/app/bin/api
+        # Check if config file exists:
+        ls -la /etc/api/config.yaml
+
+      NGINX 502:
+        sudo nginx -t                                       # check config
+        cat /etc/nginx/sites-enabled/api | grep upstream   # what upstream?
+        # 502 = nginx can reach itself but upstream (api.service) is dead
+        # Fix api.service first, then nginx 502 resolves itself
+        # OR: rollback to previous version if deployment caused api crash
+
+      ROLLBACK (if deployment is the root cause):
+        # Check what changed in v2.4.1
+        sudo systemctl cat api.service | grep -E "ExecStart|Environment"
+        # If binary or config is broken, restore previous:
+        sudo cp /opt/app/bin/api.bak /opt/app/bin/api
+        sudo systemctl start api.service
+
+  - level: 3
+    text: |
+      Structured approach — work in this order:
+
+        # === PHASE 1: TRIAGE ===
+        {
+          echo "=== DISK ===" && df -h /
+          echo "=== API SERVICE ===" && systemctl status api.service --no-pager | head -15
+          echo "=== NGINX ===" && systemctl status nginx --no-pager | head -10
+          echo "=== TOP DISK USERS ===" && du -sh /var/log/* 2>/dev/null | sort -rh | head -10
+          echo ""
+          echo "=== PRIORITY ORDER ==="
+          echo "1. Disk (blocking writes and logs — must fix first)"
+          echo "2. api.service (primary outage — investigate deployment)"
+          echo "3. nginx 502 (resolves itself once api.service is running)"
+          echo ""
+          echo "=== HYPOTHESIS ==="
+          echo "Deployment v2.4.1 introduced a crash bug in api.service."
+          echo "api.service crash logs filled /var/log until disk hit 100%."
+          echo "nginx 502 is downstream of api.service being dead."
+        } | sudo tee /tmp/triage.txt
+
+        # === PHASE 2: DISK ===
+        sudo find /var/log -name "*.log" -size +50M | sudo xargs ls -lh
+        sudo journalctl --vacuum-size=200M          # trim journal to 200MB
+        sudo logrotate --force /etc/logrotate.conf
+        df -h /                                      # confirm space freed
+
+        # === PHASE 3: API SERVICE ===
+        sudo journalctl -u api.service -n 100 --no-pager | grep -E "error|fail|panic|fatal"
+        # If deployment bug: check for config or binary issue
+        ls -la $(systemctl cat api.service | awk '/ExecStart=/{print $1}' | sed 's/ExecStart=//')
+        # Start the service
+        sudo systemctl reset-failed api.service
+        sudo systemctl start api.service
+        sudo systemctl status api.service --no-pager
+
+        # === PHASE 4: NGINX ===
+        # nginx 502 should resolve once api.service is healthy
+        curl -s -o /dev/null -w "%{http_code}" http://localhost/health
+        # If still 502: check nginx upstream config matches api port
+        sudo grep -r "upstream\|proxy_pass" /etc/nginx/ | head -10
+
+        # === PHASE 5: DOCUMENT ===
+        cat > /tmp/incident-timeline.txt << 'EOF'
+        03:40 UTC — Deployment v2.4.1 started
+        03:47 UTC — Disk 100%, api.service failed, nginx 502 alerts fired
+        03:48 UTC — Triage: disk → api → nginx dependency order identified
+        [TIME] — Disk freed via journal vacuum and logrotate
+        [TIME] — api.service started (root cause identified: [config/binary/etc.])
+        [TIME] — HTTP health check returning 200
+        [TIME] — All services stable
+        EOF
+
+        cat > /tmp/rca.txt << 'EOF'
+        === ROOT CAUSE ANALYSIS ===
+
+        TRIGGER
+        Deployment v2.4.1 at 03:40 UTC introduced a startup crash in api.service.
+        The crash loop generated high-volume error logs that filled /var/log.
+
+        CASCADE
+        1. api.service crash loop → excessive logging → disk full
+        2. Disk full → no new logs could be written → silent failures
+        3. api.service dead → nginx upstream unavailable → 502
+
+        ROOT CAUSE
+        [Describe: missing config file / bad binary / missing env var / etc.]
+
+        PREVENTION
+        1. Log rate limiting on crash loops (systemd StartLimitBurst)
+        2. Disk alert at 70% (before 100%)
+        3. Canary deployment — test v2.4.1 on one instance before full rollout
+        4. Automated rollback trigger on health check failure after deploy
+        EOF
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: triage-written
+      name: Triage Assessment Written
+      type: multi_check
+      operator: all
+      checks:
+        - id: file-exists
+          type: ssh
+          cmd: test -s /tmp/triage.txt
+          failure_hint: Write your triage assessment to /tmp/triage.txt before fixing anything
+        - id: has-priority
+          type: ssh
+          cmd: grep -qi "priorit\|order\|first\|disk\|api" /tmp/triage.txt
+          failure_hint: Triage must include your prioritization order with reasoning
+
+    - id: disk-recovered
+      name: Disk Space Recovered
+      type: ssh
+      cmd: df / | awk 'NR==2{gsub("%","",$5); if ($5<80) exit 0; exit 1}'
+      failure_hint: "Free disk space first: sudo journalctl --vacuum-size=200M && sudo logrotate --force /etc/logrotate.conf"
+
+    - id: api-service-running
+      name: api.service Active
+      type: ssh
+      cmd: systemctl is-active api.service 2>/dev/null
+      failure_hint: "Investigate api.service: journalctl -u api.service -n 50, fix root cause, then: sudo systemctl start api.service"
+
+    - id: http-health-ok
+      name: HTTP Health Check 200
+      type: ssh
+      cmd: curl -s -o /dev/null -w "%{http_code}" http://localhost/health 2>/dev/null | grep -q "^200"
+      failure_hint: "HTTP still returning non-200. Check nginx config and api.service upstream connectivity."
+
+    - id: rca-written
+      name: Root Cause Analysis Written
+      type: multi_check
+      operator: all
+      checks:
+        - id: file-exists
+          type: ssh
+          cmd: test -s /tmp/rca.txt
+          failure_hint: Write the root cause analysis to /tmp/rca.txt
+        - id: has-prevention
+          type: ssh
+          cmd: grep -qi "prevent\|canary\|alert\|rollback\|automat" /tmp/rca.txt
+          failure_hint: RCA must include concrete prevention steps that will stop this cascade from recurring
+
+completion_message: |
+  A cascade failure is not three independent problems — it is one root cause
+  with two downstream effects. Finding the root cause collapses the complexity.
+  In this case: deployment crash → log flood → disk full → silent failures.
+  Fixing disk first was correct. It unblocked logging so you could read api.service errors.
+  The discipline of triage before action is what separates engineers who stay calm
+  from engineers who make things worse by fixing symptoms instead of causes.
+  A well-written RCA that prevents the next cascade is worth more than the fastest fix.

@@ -1,0 +1,182 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-filesystem-anatomy
+title: "Filesystem Anatomy: Inodes, Hard Links, and Symlinks"
+description: >
+  Build a versioned application directory tree that demonstrates the three ways
+  Linux tracks file data on disk — inodes, hard links, and symbolic links.
+
+track: linux
+module: linux-fundamentals
+sort_order: 20
+difficulty: beginner
+engineer_level: L1
+mode: guided
+
+tags:
+  - linux
+  - filesystem
+  - inodes
+  - symlinks
+  - hardlinks
+  - find
+  - fundamentals
+
+estimated_minutes: 35
+timeout_minutes: 70
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-server-orientation
+
+briefing:
+  severity: sev-4
+  impact: No production impact — skill lab
+  title: Filesystem Lab Task
+  narrative: |
+    Inodes, hard links, and symlinks explain a class of production problems
+    that confuse engineers who only know surface-level filesystem commands.
+    "Disk full but du shows nothing" is an inode or deleted-but-open-file problem.
+    "Symlink broke after upgrade" is a link target path problem.
+    Every package manager, web server, and deployment tool is built on these primitives.
+
+evidence:
+  - type: note
+    title: What you will build
+    content: |
+      A versioned application directory — the same layout used by nginx,
+      Python virtualenvs, rbenv, and most deployment pipelines.
+      Version switching via a single symlink update. Zero restarts.
+
+objectives:
+  - Build a directory tree with brace expansion and understand mkdir -p
+  - Create hard links and explain why the file data survives deleting one name
+  - Implement version switching with symlinks — the pattern used by every package manager
+  - Use find to locate files by name, type, size, and modification time
+
+deliverables:
+  - path: /opt/myapp/conf/app.conf
+    description: Config file inside the directory tree (any content)
+  - path: /opt/myapp/conf/app.conf.bak
+    description: Hard link to app.conf — must share the same inode
+  - path: /opt/myapp-current
+    description: Symlink pointing to /opt/myapp-2.0.0
+
+success_criteria:
+  - /opt/myapp/{bin,conf,logs,data,backups} directory tree exists
+  - app.conf and app.conf.bak share the same inode number
+  - /opt/myapp-current symlink points to /opt/myapp-2.0.0
+  - find /etc -name "*.conf" -type f returns at least 5 results
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      mkdir -p creates parent directories. Brace expansion {a,b,c} creates
+      multiple items in one command.
+
+      Hard link: ln source dest — same inode, two directory entries.
+      Symlink: ln -s target linkname
+      Switch symlink: ln -sfn new-target existing-link
+        -f = force overwrite, -n = treat dest as file if it's a symlink-to-dir
+
+      Check inodes: ls -li (the first column is the inode number)
+      Check where symlink points: readlink /opt/myapp-current
+
+  - level: 2
+    text: |
+      Directory tree:
+        sudo mkdir -p /opt/myapp/{bin,conf,logs,data,backups}
+        sudo bash -c 'echo "port=8080" > /opt/myapp/conf/app.conf'
+
+      Hard link:
+        sudo ln /opt/myapp/conf/app.conf /opt/myapp/conf/app.conf.bak
+        ls -li /opt/myapp/conf/          # same number in first column = same inode
+
+      Version symlinks:
+        sudo mkdir -p /opt/myapp-1.0.0 /opt/myapp-2.0.0
+        sudo ln -s /opt/myapp-1.0.0 /opt/myapp-current
+        sudo ln -sfn /opt/myapp-2.0.0 /opt/myapp-current
+        readlink /opt/myapp-current       # should show /opt/myapp-2.0.0
+
+      find:
+        find /etc -name "*.conf" -type f 2>/dev/null | wc -l
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        sudo mkdir -p /opt/myapp/{bin,conf,logs,data,backups}
+        sudo bash -c 'echo "version=1.0.0" > /opt/myapp/conf/app.conf'
+        find /opt/myapp -type d            # verify 6 directories
+
+        sudo ln /opt/myapp/conf/app.conf /opt/myapp/conf/app.conf.bak
+        ls -li /opt/myapp/conf/            # first column = inode, must be identical
+        # Edit via .bak — original sees the change (same inode)
+        sudo bash -c 'echo "debug=true" >> /opt/myapp/conf/app.conf.bak'
+        cat /opt/myapp/conf/app.conf       # both names, one file
+
+        sudo mkdir -p /opt/myapp-1.0.0/bin /opt/myapp-2.0.0/bin
+        sudo ln -s /opt/myapp-1.0.0 /opt/myapp-current
+        readlink /opt/myapp-current        # → /opt/myapp-1.0.0
+        sudo ln -sfn /opt/myapp-2.0.0 /opt/myapp-current
+        readlink /opt/myapp-current        # → /opt/myapp-2.0.0
+        ls -la /opt/ | grep current        # lrwxrwxrwx
+
+        find /etc -name "*.conf" -type f 2>/dev/null | wc -l
+        find /var -size +1M -type f 2>/dev/null | head -5
+        find /tmp -mtime -1 -type f 2>/dev/null
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: dir-tree-created
+      name: Directory Tree Created
+      type: ssh
+      cmd: test $(find /opt/myapp -maxdepth 1 -type d 2>/dev/null | wc -l) -ge 6
+      failure_hint: "Run: sudo mkdir -p /opt/myapp/{bin,conf,logs,data,backups}"
+
+    - id: hardlink-same-inode
+      name: Hard Link Shares Inode
+      type: ssh
+      cmd: |
+        test -f /opt/myapp/conf/app.conf.bak &&
+        A=$(stat -c %i /opt/myapp/conf/app.conf 2>/dev/null) &&
+        B=$(stat -c %i /opt/myapp/conf/app.conf.bak 2>/dev/null) &&
+        [ "$A" = "$B" ]
+      failure_hint: "Run: sudo ln /opt/myapp/conf/app.conf /opt/myapp/conf/app.conf.bak"
+
+    - id: symlink-points-to-v2
+      name: Symlink Points to 2.0.0
+      type: ssh
+      cmd: readlink /opt/myapp-current 2>/dev/null | grep -q "2.0.0"
+      failure_hint: "Run: sudo ln -sfn /opt/myapp-2.0.0 /opt/myapp-current"
+
+    - id: find-returns-results
+      name: find Locates Config Files
+      type: ssh
+      cmd: test $(find /etc -name "*.conf" -type f 2>/dev/null | wc -l) -ge 5
+      failure_hint: "Run: find /etc -name '*.conf' -type f 2>/dev/null"
+
+completion_message: |
+  Hard links share an inode — the data survives until every link is removed.
+  This is why deleted files still appear in lsof when a process holds them open,
+  and why "disk full but du shows nothing" happens after log rotation without a reload.
+  Symlinks are path pointers — one ln -sfn atomically redirects every consumer.

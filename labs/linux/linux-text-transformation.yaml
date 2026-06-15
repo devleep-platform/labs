@@ -1,0 +1,235 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-text-transformation
+title: "awk and sed: Parse and Transform Structured Text at Scale"
+description: >
+  Process an nginx access log to compute request statistics using awk,
+  then use sed to transform configuration files in place.
+  These are the two tools used in every log analysis pipeline and config management script.
+
+track: linux
+module: shell-scripting
+sort_order: 110
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - awk
+  - sed
+  - text-processing
+  - logs
+  - scripting
+  - shell-scripting
+
+estimated_minutes: 55
+timeout_minutes: 110
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-bash-foundation
+
+briefing:
+  severity: sev-4
+  impact: No production impact — skill lab
+  title: Log Stats Script Required
+  narrative: |
+    awk and sed are not interchangeable — they solve different problems.
+    awk is a complete language for processing structured, column-based text.
+    sed is a stream editor for line-based substitutions and deletions.
+    Together, they handle 95% of log parsing and config transformation tasks
+    without writing a Python script.
+
+evidence:
+  - type: note
+    title: What you will process
+    content: |
+      nginx access log at /var/log/nginx/access.log (or generate one).
+      Tasks:
+        1. Count requests by HTTP status code
+        2. Find the top 5 requested URLs
+        3. Compute average response size in bytes
+        4. Transform a config template using sed
+
+objectives:
+  - Use awk to split lines by field and perform arithmetic accumulation
+  - Use awk associative arrays to count and group values
+  - Use sed for multi-line substitutions, in-place editing, and address ranges
+  - Chain awk and sed with sort, uniq, and head to build analysis pipelines
+
+deliverables:
+  - path: /usr/local/bin/log-stats.sh
+    description: |
+      Script that analyzes /var/log/nginx/access.log and outputs:
+        - Request count by HTTP status code (sorted descending)
+        - Top 5 most-requested URLs
+        - Average response size in bytes
+  - path: /tmp/log-analysis.txt
+    description: Output of running log-stats.sh
+  - path: /tmp/config-transformed.txt
+    description: |
+      A config template with these substitutions applied (sed):
+        - Replace {{HOSTNAME}} with actual hostname
+        - Replace {{PORT}} with 8080
+        - Remove all lines starting with #
+
+success_criteria:
+  - /usr/local/bin/log-stats.sh exists and is executable
+  - /tmp/log-analysis.txt contains status code counts
+  - /tmp/config-transformed.txt exists with no lines starting with #
+  - Script uses awk associative arrays (a[key]++)
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      nginx combined log format fields:
+        $1=IP  $7=URL  $9=status  $10=bytes  $7=referrer  $NF=user-agent
+
+      awk associative arrays — count occurrences:
+        awk '{count[$9]++} END{for(s in count) print count[s], s}' access.log
+
+      awk arithmetic accumulation:
+        awk '{sum+=$10; count++} END{print sum/count}' access.log
+
+      sed substitution:
+        sed 's/old/new/g'              — replace all on each line
+        sed '/^#/d'                    — delete lines starting with #
+        sed -i 's/old/new/g' file      — edit file in place (-i)
+        sed "s/{{HOST}}/$(hostname)/g" — shell variable expansion (use double quotes)
+
+  - level: 2
+    text: |
+      Generate a sample log if /var/log/nginx/access.log is empty:
+        sudo bash -c 'for i in $(seq 1 50); do
+          echo "127.0.0.1 - - [$(date +%d/%b/%Y:%T)] \"GET /index.html HTTP/1.1\" 200 1024" >> /var/log/nginx/access.log
+          echo "127.0.0.1 - - [$(date +%d/%b/%Y:%T)] \"GET /api/data HTTP/1.1\" 404 512" >> /var/log/nginx/access.log
+        done'
+
+      Status code counts:
+        awk '{count[$9]++} END{for(s in count) print count[s], s}' /var/log/nginx/access.log \
+          | sort -rn
+
+      Top 5 URLs:
+        awk '{print $7}' /var/log/nginx/access.log \
+          | sort | uniq -c | sort -rn | head -5
+
+      Average response size:
+        awk '{sum+=$10; n++} END{printf "Average: %.0f bytes\n", sum/n}' /var/log/nginx/access.log
+
+      sed config transform:
+        sed -e "s/{{HOSTNAME}}/$(hostname)/g" \
+            -e 's/{{PORT}}/8080/g' \
+            -e '/^#/d' \
+            -e '/^$/d' template.conf > /tmp/config-transformed.txt
+
+  - level: 3
+    text: |
+      Complete script:
+
+        sudo tee /usr/local/bin/log-stats.sh << 'SCRIPT'
+        #!/bin/bash
+        set -euo pipefail
+        LOG="${1:-/var/log/nginx/access.log}"
+
+        if [ ! -s "$LOG" ]; then
+          echo "Log file empty or missing: $LOG" >&2
+          exit 1
+        fi
+
+        echo "=== Request Count by Status Code ==="
+        awk '{count[$9]++} END{for(s in count) print count[s], s}' "$LOG" \
+          | sort -rn
+
+        echo ""
+        echo "=== Top 5 Requested URLs ==="
+        awk '{print $7}' "$LOG" | sort | uniq -c | sort -rn | head -5
+
+        echo ""
+        echo "=== Average Response Size ==="
+        awk '$10 ~ /^[0-9]+$/ {sum+=$10; n++} END{
+          if(n>0) printf "%.0f bytes avg over %d requests\n", sum/n, n
+          else print "no numeric response sizes found"
+        }' "$LOG"
+        SCRIPT
+
+        sudo chmod +x /usr/local/bin/log-stats.sh
+        /usr/local/bin/log-stats.sh | tee /tmp/log-analysis.txt
+
+        # sed config transform
+        tee /tmp/app.conf.template << 'EOF'
+        # Application configuration
+        # Generated by template engine
+        server_name = {{HOSTNAME}}
+        port        = {{PORT}}
+        debug       = false
+        # End of config
+        EOF
+
+        sed -e "s/{{HOSTNAME}}/$(hostname)/g" \
+            -e 's/{{PORT}}/8080/g' \
+            -e '/^#/d' \
+            -e '/^[[:space:]]*$/d' \
+            /tmp/app.conf.template > /tmp/config-transformed.txt
+
+        cat /tmp/config-transformed.txt
+        # Should show only the non-comment, non-empty lines with substitutions applied
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: script-exists-executable
+      name: log-stats.sh Exists and Is Executable
+      type: ssh
+      cmd: test -x /usr/local/bin/log-stats.sh
+      failure_hint: "Create /usr/local/bin/log-stats.sh and chmod +x it"
+
+    - id: script-uses-awk-array
+      name: Script Uses awk Associative Array
+      type: ssh
+      cmd: grep -q 'count\[' /usr/local/bin/log-stats.sh 2>/dev/null
+      failure_hint: "Use awk '{count[$9]++} END{...}' to count by status code"
+
+    - id: log-analysis-written
+      name: Log Analysis Written
+      type: ssh
+      cmd: test -s /tmp/log-analysis.txt && test $(wc -l < /tmp/log-analysis.txt) -ge 3
+      failure_hint: "Run: /usr/local/bin/log-stats.sh | tee /tmp/log-analysis.txt"
+
+    - id: config-transformed
+      name: Config Template Transformed
+      type: ssh
+      cmd: test $(grep -c '^#' /tmp/config-transformed.txt 2>/dev/null || echo 0) -eq 0
+      failure_hint: "Use sed '/^#/d' to remove comment lines from the config template"
+
+    - id: hostname-substituted
+      name: Hostname Substituted in Config
+      type: ssh
+      cmd: test $(grep -c "{{HOSTNAME}}" /tmp/config-transformed.txt 2>/dev/null || echo 0) -eq 0
+      failure_hint: "Use sed \"s/{{HOSTNAME}}/$(hostname)/g\" to substitute the hostname"
+
+completion_message: |
+  awk processes structured text by field — it replaces Python for anything that
+  fits on one line and doesn't need persistent state beyond accumulators.
+  sed transforms streams — it replaces manual file editing in automation scripts.
+  The common mistake is using sed when you should use awk (field-based problems)
+  or using awk when you should use sed (simple line substitutions).
+  Know which tool to reach for first and you will write cleaner pipelines.

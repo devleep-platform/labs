@@ -1,0 +1,232 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-security-hardening
+title: "Security Hardening: Find and Fix the Misconfigurations"
+description: >
+  A security scanner flagged this server with critical findings.
+  Five misconfigurations are present. Find them all, understand
+  why each one is dangerous, and fix them without breaking the application.
+
+track: linux
+module: linux-troubleshooting
+sort_order: 150
+difficulty: intermediate
+engineer_level: L2
+mode: incident
+
+tags:
+  - linux
+  - security
+  - hardening
+  - suid
+  - world-writable
+  - permissions
+  - ssh
+  - troubleshooting
+
+estimated_minutes: 55
+timeout_minutes: 110
+
+terraform_module: labs/linux-ec2
+scenario_id: misconfigured-server
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-users-and-access
+  - linux-ssh-mastery
+
+briefing:
+  severity: sev-2
+  impact: Server exposed to privilege escalation and data exfiltration
+  title: Security Findings — Multiple Critical
+  narrative: |
+    An automated security scan ran against this server after a compliance review.
+    It flagged five findings ranging from world-writable sensitive files to
+    unnecessary SUID binaries and weak SSH configuration.
+    None of these have been exploited yet — but the window is open.
+    Fix all five findings and document each remediation.
+  incident:
+    detected_at: "2026-02-10T11:30:00Z"
+    severity: sev-2
+    impacted_services: [all]
+
+evidence:
+  - type: note
+    title: "Security Scan Report SEC-2026-014"
+    content: |
+      CRITICAL findings:
+        [1] World-writable file with sensitive content
+        [2] SUID binary not in approved list
+        [3] SSH allows root login
+        [4] User with UID 0 that is not root
+        [5] Cron job running as root executing world-writable script
+
+objectives:
+  - Identify world-writable files that should be restricted
+  - Find and remove unauthorized SUID binaries
+  - Audit /etc/passwd for accounts with UID 0
+  - Verify SSH hardening is in place
+  - Find cron jobs running privileged scripts that are world-writable
+
+deliverables:
+  - path: /tmp/security-findings.txt
+    description: |
+      All five findings documented with:
+        - File or setting affected
+        - Why it is dangerous
+        - Remediation applied
+  - path: /tmp/security-after.txt
+    description: |
+      Post-fix verification output proving each finding is resolved:
+        - find for world-writable sensitive files (should be empty)
+        - find for unauthorized SUID binaries (should be empty or approved list only)
+        - grep for UID 0 in /etc/passwd (should show only root)
+        - sshd -T output for PermitRootLogin
+        - cron job script permissions
+
+success_criteria:
+  - No world-writable files in /etc, /usr, or /var/www
+  - No unauthorized SUID binaries outside /usr/bin and /bin
+  - No accounts with UID 0 other than root
+  - PermitRootLogin no in sshd effective config
+  - /tmp/security-findings.txt documents all five findings
+  - /tmp/security-after.txt shows clean state
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      Five distinct categories of misconfiguration. Find each one independently.
+
+      For each finding, ask:
+        - What is the exact file or setting?
+        - What privilege does an attacker gain from it?
+        - What is the minimal fix that removes the risk without breaking functionality?
+
+      Document before fixing. You cannot write a findings report from memory.
+
+  - level: 2
+    text: |
+      World-writable sensitive files:
+        find /etc /usr /var/www -perm -o+w -type f 2>/dev/null
+
+      Unauthorized SUID binaries:
+        find / -perm /4000 -type f 2>/dev/null
+        # Compare against: /usr/bin/passwd, /usr/bin/sudo, /usr/bin/newgrp — these are expected
+
+      UID 0 accounts:
+        awk -F: '$3==0{print $1}' /etc/passwd
+
+      SSH root login:
+        sudo sshd -T | grep permitrootlogin
+
+      World-writable cron scripts:
+        for f in $(crontab -l 2>/dev/null | awk '{print $NF}'); do
+          [ -w "$f" ] && echo "World-writable cron script: $f"
+        done
+        sudo find /etc/cron.d /etc/cron.daily -type f -perm -o+w 2>/dev/null
+
+  - level: 3
+    text: |
+      Finding and fixing each:
+
+        # 1. World-writable sensitive files
+        find /etc /usr /var/www -perm -o+w -type f 2>/dev/null
+        # Fix: remove world-write bit
+        sudo chmod o-w /path/to/file
+
+        # 2. Unauthorized SUID binaries
+        find / -perm /4000 -type f 2>/dev/null | sort
+        # Known-good SUID: /usr/bin/passwd /usr/bin/sudo /usr/bin/newgrp /usr/bin/chsh
+        # Anything else: investigate, then remove setuid if not required
+        sudo chmod u-s /path/to/suspicious/binary
+
+        # 3. UID 0 accounts (should be ONLY root)
+        awk -F: '$3==0' /etc/passwd
+        # Any non-root UID 0 account: lock it or remove it
+        sudo usermod -L suspicious-account    # lock without deleting
+        sudo usermod -u 1001 suspicious-account  # change UID away from 0
+
+        # 4. SSH root login
+        sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+        sudo sshd -t && sudo systemctl reload sshd
+
+        # 5. World-writable cron scripts
+        sudo find /etc/cron.d /etc/cron.daily /var/spool/cron -perm -o+w 2>/dev/null
+        sudo chmod o-w /path/to/cron/script
+
+        # Document findings
+        {
+          echo "=== FINDINGS ==="
+          echo "1. World-writable files in /etc: ..."
+          echo "2. Unauthorized SUID: ..."
+          echo "3. UID 0 accounts: ..."
+          echo "4. SSH PermitRootLogin: ..."
+          echo "5. World-writable cron scripts: ..."
+        } > /tmp/security-findings.txt
+
+        # Post-fix verification
+        {
+          echo "=== POST-FIX VERIFICATION ==="
+          echo "--- World-writable sensitive files ---"
+          find /etc /usr /var/www -perm -o+w -type f 2>/dev/null || echo "CLEAN"
+          echo "--- UID 0 accounts ---"
+          awk -F: '$3==0{print $1}' /etc/passwd
+          echo "--- SSH PermitRootLogin ---"
+          sudo sshd -T 2>/dev/null | grep permitrootlogin
+        } > /tmp/security-after.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: no-world-writable-sensitive
+      name: No World-Writable Sensitive Files
+      type: ssh
+      cmd: test $(find /etc /usr /var/www -perm -o+w -type f 2>/dev/null | wc -l) -eq 0
+      failure_hint: "Run: find /etc /usr /var/www -perm -o+w -type f 2>/dev/null then chmod o-w on each"
+
+    - id: no-uid-zero-except-root
+      name: No Non-Root UID 0 Account
+      type: ssh
+      cmd: |
+        test $(awk -F: '$3==0{print $1}' /etc/passwd | wc -l) -eq 1
+      failure_hint: "Run: awk -F: '$3==0{print $1}' /etc/passwd — only 'root' should appear"
+
+    - id: ssh-root-disabled
+      name: SSH Root Login Disabled
+      type: ssh
+      cmd: sudo sshd -T 2>/dev/null | grep -q "^permitrootlogin no"
+      failure_hint: "Set PermitRootLogin no in /etc/ssh/sshd_config then sudo systemctl reload sshd"
+
+    - id: findings-documented
+      name: All Findings Documented
+      type: ssh
+      cmd: test -s /tmp/security-findings.txt && test $(wc -l < /tmp/security-findings.txt) -ge 5
+      failure_hint: Document all five findings with the affected file/setting and remediation applied
+
+    - id: verification-written
+      name: Post-Fix Verification Written
+      type: ssh
+      cmd: test -s /tmp/security-after.txt && grep -qi "clean\|no\|0" /tmp/security-after.txt
+      failure_hint: Run find and sshd -T after fixes and write the clean output to /tmp/security-after.txt
+
+completion_message: |
+  Security misconfigurations compound. A world-writable cron script running
+  as root is a local privilege escalation waiting to happen — any user who can
+  write to that script can execute arbitrary code as root on the next cron tick.
+  World-writable + cron + root = full compromise via one file permission.
+  Automated scanning finds these. Manual review confirms them. Fix them the same day.

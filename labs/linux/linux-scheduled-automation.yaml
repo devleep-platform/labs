@@ -1,0 +1,257 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-scheduled-automation
+title: "Scheduled Automation: cron, anacron, and Reliable Job Design"
+description: >
+  Schedule three maintenance tasks using cron and anacron.
+  Learn why scheduled jobs silently fail and how to write jobs
+  that log their results and alert when they stop running.
+
+track: linux
+module: shell-scripting
+sort_order: 120
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - cron
+  - anacron
+  - scheduling
+  - automation
+  - logging
+  - shell-scripting
+
+estimated_minutes: 50
+timeout_minutes: 100
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-script-error-handling
+
+briefing:
+  severity: sev-4
+  impact: No production impact — administration task
+  title: Automation Jobs Required
+  narrative: |
+    Cron jobs are the silent workers of every Linux system. They are also
+    the most common source of "it worked last month" failures. A job can
+    stop running silently for weeks before anyone notices. This lab teaches
+    how to schedule jobs correctly, capture their output, and design them
+    so failure is visible rather than silent.
+
+evidence:
+  - type: note
+    title: Tasks to schedule
+    content: |
+      1. Log cleanup — daily at 2 AM, delete logs older than 30 days
+      2. Disk space alert — every 6 hours, warn if above 80%
+      3. App backup — weekly on Sunday at 1 AM, archive /opt/myapp
+
+objectives:
+  - Write cron timing expressions correctly and verify them
+  - Capture cron job stdout and stderr to a log file
+  - Use MAILTO and output redirection to make failures visible
+  - Understand the difference between cron and anacron for missed jobs
+
+deliverables:
+  - path: /usr/local/bin/log-cleanup.sh
+    description: Deletes log files older than 30 days under /var/log, logs actions
+  - path: /usr/local/bin/disk-alert.sh
+    description: Prints WARN if disk above threshold, PASS otherwise — safe to run from cron
+  - path: /etc/cron.d/myapp-maintenance
+    description: |
+      Cron file with three jobs:
+        - log-cleanup.sh daily at 02:00
+        - disk-alert.sh every 6 hours
+        - backup job weekly on Sunday 01:00
+  - path: /tmp/cron-audit.txt
+    description: |
+      Audit showing:
+        - Contents of /etc/cron.d/myapp-maintenance
+        - Manual test run of each script with exit code
+
+success_criteria:
+  - Both scripts exist and are executable
+  - Scripts redirect stderr to stdout (2>&1) for cron log capture
+  - /etc/cron.d/myapp-maintenance exists with correct syntax
+  - crontab syntax verified with crontab (no errors)
+  - /tmp/cron-audit.txt documents manual test runs
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      Cron timing:  minute  hour  day  month  weekday
+        0 2 * * *       — 2:00 AM every day
+        0 */6 * * *     — every 6 hours
+        0 1 * * 0       — Sunday 1:00 AM (0=Sunday)
+
+      Critical rule: cron runs jobs with a minimal environment.
+        - PATH does not include /usr/local/bin — use full paths
+        - No HOME, no USER by default
+        - No terminal — all output goes to MAILTO or is lost forever
+
+      Capture output in the job:
+        0 2 * * * root /usr/local/bin/log-cleanup.sh >> /var/log/cleanup.log 2>&1
+
+      Test cron syntax without running:
+        crontab -l              — list current crontab
+        crontab /etc/cron.d/myapp-maintenance — install from file (don't do for system crons)
+
+  - level: 2
+    text: |
+      log-cleanup.sh:
+        #!/bin/bash
+        set -euo pipefail
+        echo "[$(date)] Starting log cleanup"
+        find /var/log -name "*.log" -mtime +30 -type f -print -delete 2>/dev/null || true
+        echo "[$(date)] Cleanup complete"
+
+      disk-alert.sh:
+        #!/bin/bash
+        THRESHOLD="${1:-80}"
+        USED=$(df / | awk 'NR==2{gsub("%","",$5);print $5}')
+        if [ "$USED" -ge "$THRESHOLD" ]; then
+          echo "WARN: disk at ${USED}% (threshold ${THRESHOLD}%)"
+          exit 1
+        fi
+        echo "PASS: disk at ${USED}%"
+
+      /etc/cron.d/myapp-maintenance:
+        SHELL=/bin/bash
+        PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+        # Log cleanup — daily at 2 AM
+        0 2 * * * root /usr/local/bin/log-cleanup.sh >> /var/log/cleanup.log 2>&1
+
+        # Disk alert — every 6 hours
+        0 */6 * * * root /usr/local/bin/disk-alert.sh >> /var/log/disk-alert.log 2>&1
+
+        # Weekly backup — Sunday 1 AM
+        0 1 * * 0 root tar -czf /tmp/myapp-backup-$(date +\%Y\%m\%d).tar.gz /opt/myapp 2>&1 | tee -a /var/log/backup.log
+
+  - level: 3
+    text: |
+      Create the scripts:
+
+        sudo tee /usr/local/bin/log-cleanup.sh << 'EOF'
+        #!/bin/bash
+        set -euo pipefail
+        LOG_DIR="${1:-/var/log}"
+        DAYS="${2:-30}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log cleanup started (dir: $LOG_DIR, older than: ${DAYS}d)"
+        COUNT=$(find "$LOG_DIR" -name "*.log" -mtime +"$DAYS" -type f 2>/dev/null | wc -l)
+        find "$LOG_DIR" -name "*.log" -mtime +"$DAYS" -type f -print -delete 2>/dev/null || true
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Removed $COUNT files"
+        EOF
+
+        sudo tee /usr/local/bin/disk-alert.sh << 'EOF'
+        #!/bin/bash
+        THRESHOLD="${1:-80}"
+        HOSTNAME=$(hostname)
+        USED=$(df / | awk 'NR==2{gsub("%","",$5);print $5}')
+        TS=$(date '+%Y-%m-%d %H:%M:%S')
+        if [ "$USED" -ge "$THRESHOLD" ]; then
+          echo "[$TS] WARN $HOSTNAME: disk at ${USED}% (threshold: ${THRESHOLD}%)"
+          exit 1
+        fi
+        echo "[$TS] PASS $HOSTNAME: disk at ${USED}%"
+        EOF
+
+        sudo chmod +x /usr/local/bin/log-cleanup.sh /usr/local/bin/disk-alert.sh
+
+        # Create the cron file
+        sudo tee /etc/cron.d/myapp-maintenance << 'EOF'
+        SHELL=/bin/bash
+        PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+        MAILTO=""
+
+        # Log cleanup — daily 2 AM
+        0 2 * * * root /usr/local/bin/log-cleanup.sh >> /var/log/cleanup.log 2>&1
+
+        # Disk alert — every 6 hours
+        0 */6 * * * root /usr/local/bin/disk-alert.sh >> /var/log/disk-alert.log 2>&1
+
+        # Weekly backup — Sunday 1 AM
+        0 1 * * 0 root tar -czf /tmp/myapp-backup-$(date +\%Y\%m\%d).tar.gz /opt/myapp 2>&1 | tee -a /var/log/backup.log
+        EOF
+
+        sudo chmod 644 /etc/cron.d/myapp-maintenance
+
+        # Audit — run scripts manually to verify them
+        {
+          echo "=== CRON FILE ==="
+          cat /etc/cron.d/myapp-maintenance
+          echo ""
+          echo "=== LOG CLEANUP TEST ==="
+          sudo /usr/local/bin/log-cleanup.sh; echo "Exit: $?"
+          echo ""
+          echo "=== DISK ALERT TEST ==="
+          /usr/local/bin/disk-alert.sh; echo "Exit: $?"
+        } | tee /tmp/cron-audit.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: cleanup-script-exists
+      name: log-cleanup.sh Executable
+      type: ssh
+      cmd: test -x /usr/local/bin/log-cleanup.sh
+      failure_hint: "Create /usr/local/bin/log-cleanup.sh and chmod +x it"
+
+    - id: disk-alert-script-exists
+      name: disk-alert.sh Executable
+      type: ssh
+      cmd: test -x /usr/local/bin/disk-alert.sh
+      failure_hint: "Create /usr/local/bin/disk-alert.sh and chmod +x it"
+
+    - id: cron-file-exists
+      name: Cron File Written
+      type: ssh
+      cmd: test -f /etc/cron.d/myapp-maintenance && test $(wc -l < /etc/cron.d/myapp-maintenance) -ge 3
+      failure_hint: "Write /etc/cron.d/myapp-maintenance with at least 3 scheduled jobs"
+
+    - id: cron-file-has-paths
+      name: Cron File Defines PATH
+      type: ssh
+      cmd: grep -q "^PATH=" /etc/cron.d/myapp-maintenance 2>/dev/null
+      failure_hint: "Add PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin to the cron file"
+
+    - id: jobs-capture-output
+      name: Cron Jobs Redirect Output
+      type: ssh
+      cmd: grep -q "2>&1" /etc/cron.d/myapp-maintenance 2>/dev/null
+      failure_hint: "Add >> /var/log/jobname.log 2>&1 to each cron job to capture output"
+
+    - id: audit-written
+      name: Cron Audit Written
+      type: ssh
+      cmd: test -s /tmp/cron-audit.txt
+      failure_hint: "Run each script manually and write results to /tmp/cron-audit.txt"
+
+completion_message: |
+  A cron job that silently discards output is a liability.
+  When it stops working — and they all eventually stop working — you have
+  no log, no timestamp, and no error message to start debugging with.
+  Always redirect to a log file with 2>&1. Always set PATH explicitly.
+  Always test the script manually before scheduling it.
+  The job that works interactively but fails in cron has a PATH or environment problem.

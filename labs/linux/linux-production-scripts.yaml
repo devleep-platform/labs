@@ -1,0 +1,309 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-production-scripts
+title: "Production Scripts: Atomic Deployment with Rollback"
+description: >
+  Write a production-grade deployment script that uses atomic symlink switching,
+  keeps the last three releases for rollback, validates after deploy,
+  and cleans up on failure — the pattern used by Capistrano, Deployer, and Shipit.
+
+track: linux
+module: shell-scripting
+sort_order: 130
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - bash
+  - deployment
+  - rollback
+  - symlinks
+  - automation
+  - production
+  - shell-scripting
+
+estimated_minutes: 65
+timeout_minutes: 120
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-script-error-handling
+
+briefing:
+  severity: sev-4
+  impact: No production impact — skill lab
+  title: Atomic Deployment Script Required
+  narrative: |
+    The team deploys by SSHing into the server and overwriting files in /opt/myapp
+    with rsync. When something breaks, rollback means copying files back from a backup
+    that may or may not exist. This lab replaces that approach with atomic symlink
+    deployment: each release lives in its own timestamped directory, the live symlink
+    switches atomically, and rollback is a single ln -sfn command.
+
+evidence:
+  - type: note
+    title: Target deployment layout
+    content: |
+      /opt/releases/
+        20260112_143000/     ← previous release
+        20260112_160000/     ← current release
+        20260113_090000/     ← newest release
+      /opt/current → /opt/releases/20260113_090000
+      /opt/myapp   → /opt/current   (app reads this path)
+
+objectives:
+  - Implement atomic deployment using symlink switching
+  - Write argument parsing with getopts for --version, --rollback, --list flags
+  - Validate deployment success before switching the live symlink
+  - Auto-clean old releases, keeping exactly three
+
+deliverables:
+  - path: /usr/local/bin/deploy-app.sh
+    description: |
+      Full deployment script supporting:
+        deploy-app.sh --version 1.2.3    (deploy new release)
+        deploy-app.sh --rollback          (switch to previous release)
+        deploy-app.sh --list              (show all releases, mark current)
+  - path: /tmp/deploy-demo.txt
+    description: |
+      Demo output showing:
+        - Three successive deploys (creates three release dirs)
+        - --list output showing all releases
+        - --rollback switching to previous release
+        - --list again confirming the change
+
+success_criteria:
+  - /usr/local/bin/deploy-app.sh exists and is executable
+  - --version flag deploys to a timestamped directory under /opt/releases/
+  - /opt/current symlink updated atomically on each deploy
+  - --rollback switches /opt/current to the previous release
+  - Old releases are pruned keeping only the last 3
+  - /tmp/deploy-demo.txt shows all four operations
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      The atomic switch is two commands:
+        1. Create new release in /opt/releases/TIMESTAMP/
+        2. ln -sfn /opt/releases/TIMESTAMP /opt/current
+        ln -sfn is atomic on the same filesystem — the switch is instant.
+
+      getopts parses short flags (-v, -r, -l).
+      For long flags (--version, --rollback) use a case statement on $1.
+
+      Keep last N releases:
+        ls -1t /opt/releases/ | tail -n +4 | xargs -I{} rm -rf /opt/releases/{}
+
+      Get previous release (for rollback):
+        ls -1t /opt/releases/ | sed -n '2p'
+
+  - level: 2
+    text: |
+      Argument parsing:
+        case "${1:-}" in
+          --version) VERSION="$2"; deploy "$VERSION" ;;
+          --rollback) rollback ;;
+          --list)    list_releases ;;
+          *) usage; exit 1 ;;
+        esac
+
+      deploy() function:
+        local version="$1"
+        local ts=$(date +%Y%m%d_%H%M%S)
+        local release_dir="/opt/releases/${ts}_${version}"
+        sudo mkdir -p "$release_dir"
+        # write app files to $release_dir
+        echo "$version" | sudo tee "$release_dir/VERSION"
+        # validate
+        test -f "$release_dir/VERSION" || { echo "Validation failed"; exit 1; }
+        # atomic switch
+        sudo ln -sfn "$release_dir" /opt/current
+        # prune old releases
+        ls -1t /opt/releases/ | tail -n +4 | xargs -I{} sudo rm -rf "/opt/releases/{}"
+      }
+
+      rollback() function:
+        local prev=$(ls -1t /opt/releases/ | sed -n '2p')
+        [ -z "$prev" ] && { echo "No previous release"; exit 1; }
+        sudo ln -sfn "/opt/releases/$prev" /opt/current
+        echo "Rolled back to: $prev"
+
+  - level: 3
+    text: |
+      Complete script:
+
+        sudo tee /usr/local/bin/deploy-app.sh << 'SCRIPT'
+        #!/bin/bash
+        set -euo pipefail
+
+        RELEASES_DIR="/opt/releases"
+        CURRENT_LINK="/opt/current"
+        KEEP_RELEASES=3
+
+        log() { echo "[$(date '+%H:%M:%S')] $*"; }
+        die() { echo "ERROR: $*" >&2; exit 1; }
+
+        usage() {
+          echo "Usage: $(basename "$0") --version VERSION | --rollback | --list"
+        }
+
+        deploy() {
+          local version="$1"
+          local ts release_dir
+          ts=$(date +%Y%m%d_%H%M%S)
+          release_dir="${RELEASES_DIR}/${ts}_${version}"
+
+          log "Deploying version $version to $release_dir"
+          sudo mkdir -p "$release_dir"
+
+          # Simulate writing app files
+          echo "$version" | sudo tee "$release_dir/VERSION" > /dev/null
+          echo "deployed_at=$(date)" | sudo tee -a "$release_dir/VERSION" > /dev/null
+
+          # Validate before switching
+          test -f "$release_dir/VERSION" || die "Post-deploy validation failed"
+          log "Validation passed"
+
+          # Atomic switch
+          sudo ln -sfn "$release_dir" "$CURRENT_LINK"
+          log "Live symlink updated: $CURRENT_LINK → $release_dir"
+
+          # Prune old releases
+          local count
+          count=$(ls -1t "$RELEASES_DIR" 2>/dev/null | wc -l)
+          if [ "$count" -gt "$KEEP_RELEASES" ]; then
+            ls -1t "$RELEASES_DIR" | tail -n "+$((KEEP_RELEASES + 1))" \
+              | while read -r old; do
+                  sudo rm -rf "${RELEASES_DIR:?}/$old"
+                  log "Pruned old release: $old"
+                done
+          fi
+
+          log "Deploy complete. Current: $(readlink $CURRENT_LINK)"
+        }
+
+        rollback() {
+          local prev
+          prev=$(ls -1t "$RELEASES_DIR" 2>/dev/null | sed -n '2p')
+          [ -z "$prev" ] && die "No previous release to roll back to"
+          log "Rolling back to: $prev"
+          sudo ln -sfn "${RELEASES_DIR}/${prev}" "$CURRENT_LINK"
+          log "Rollback complete. Current: $(readlink $CURRENT_LINK)"
+        }
+
+        list_releases() {
+          local current
+          current=$(readlink "$CURRENT_LINK" 2>/dev/null | xargs basename 2>/dev/null || echo "none")
+          echo "Releases (newest first):"
+          ls -1t "$RELEASES_DIR" 2>/dev/null | while read -r r; do
+            [ "$r" = "$current" ] && echo "  * $r  ← current" || echo "    $r"
+          done
+        }
+
+        sudo mkdir -p "$RELEASES_DIR"
+
+        case "${1:-}" in
+          --version)  [ -n "${2:-}" ] || die "--version requires a value"; deploy "$2" ;;
+          --rollback) rollback ;;
+          --list)     list_releases ;;
+          *)          usage; exit 1 ;;
+        esac
+        SCRIPT
+
+        sudo chmod +x /usr/local/bin/deploy-app.sh
+
+        # Demo
+        {
+          echo "=== DEPLOY v1.0.0 ==="
+          /usr/local/bin/deploy-app.sh --version 1.0.0
+
+          echo ""
+          echo "=== DEPLOY v1.1.0 ==="
+          /usr/local/bin/deploy-app.sh --version 1.1.0
+
+          echo ""
+          echo "=== DEPLOY v1.2.0 ==="
+          /usr/local/bin/deploy-app.sh --version 1.2.0
+
+          echo ""
+          echo "=== LIST RELEASES ==="
+          /usr/local/bin/deploy-app.sh --list
+
+          echo ""
+          echo "=== ROLLBACK ==="
+          /usr/local/bin/deploy-app.sh --rollback
+
+          echo ""
+          echo "=== LIST AFTER ROLLBACK ==="
+          /usr/local/bin/deploy-app.sh --list
+        } | tee /tmp/deploy-demo.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: script-exists-executable
+      name: deploy-app.sh Exists and Is Executable
+      type: ssh
+      cmd: test -x /usr/local/bin/deploy-app.sh
+      failure_hint: "Create /usr/local/bin/deploy-app.sh and chmod +x it"
+
+    - id: releases-dir-created
+      name: Releases Directory Created
+      type: ssh
+      cmd: test -d /opt/releases
+      failure_hint: "Run: /usr/local/bin/deploy-app.sh --version 1.0.0 to create the first release"
+
+    - id: current-symlink-exists
+      name: /opt/current Symlink Exists
+      type: ssh
+      cmd: test -L /opt/current && readlink /opt/current | grep -q "releases"
+      failure_hint: "The --version flag should create /opt/current pointing to the new release"
+
+    - id: three-releases-created
+      name: Three Releases Exist
+      type: ssh
+      cmd: test $(ls -1 /opt/releases 2>/dev/null | wc -l) -ge 3
+      failure_hint: "Run deploy-app.sh --version for three different versions to create three releases"
+
+    - id: rollback-works
+      name: Rollback Switches Symlink
+      type: ssh
+      cmd: |
+        BEFORE=$(readlink /opt/current)
+        /usr/local/bin/deploy-app.sh --rollback 2>/dev/null
+        AFTER=$(readlink /opt/current)
+        [ "$BEFORE" != "$AFTER" ]
+      failure_hint: "The --rollback flag must switch /opt/current to the previous release"
+
+    - id: demo-written
+      name: Demo Output Written
+      type: ssh
+      cmd: test -s /tmp/deploy-demo.txt && grep -q "rollback" /tmp/deploy-demo.txt
+      failure_hint: "Run all four operations and write output to /tmp/deploy-demo.txt"
+
+completion_message: |
+  This pattern — timestamped release directories plus a single live symlink —
+  is how Capistrano, Deployer, and every serious deployment tool works under the hood.
+  Rollback is instantaneous because no files are moved or deleted.
+  The old release is still there, the symlink just points elsewhere.
+  Deploy with confidence knowing one command restores the previous state.

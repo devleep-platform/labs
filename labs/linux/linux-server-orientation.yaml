@@ -1,0 +1,178 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-server-orientation
+title: "Server Orientation: First 5 Minutes on an Unknown Machine"
+description: >
+  You have been given SSH access to a server nobody documented.
+  Establish facts before anyone touches the configuration.
+
+track: linux
+module: linux-fundamentals
+sort_order: 10
+difficulty: beginner
+engineer_level: L1
+mode: guided
+
+tags:
+  - linux
+  - orientation
+  - fundamentals
+  - assessment
+  - operations
+
+estimated_minutes: 30
+timeout_minutes: 60
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites: []
+
+briefing:
+  severity: sev-4
+  impact: No production impact — onboarding task
+  title: Server Baseline Task
+  narrative: |
+    You have been handed SSH access to a server being promoted to staging.
+    Nobody documented what it runs, what is installed, or when it was last used.
+    Your job before anyone else touches it: establish facts.
+    This baseline procedure takes under five minutes and prevents every
+    "we changed the wrong server" incident.
+
+evidence:
+  - type: note
+    title: "Ticket INFRA-001"
+    content: |
+      Task: Baseline the server before staging rotation.
+      Owner: you
+      Deliverable: /tmp/server-summary.txt
+
+objectives:
+  - Identify OS, kernel version, and architecture on login
+  - Check CPU load, memory, and disk in under two minutes
+  - Inventory running services and listening ports
+  - Produce a baseline document the team can reference
+
+deliverables:
+  - path: /tmp/server-summary.txt
+    description: |
+      A baseline report containing:
+        - Hostname and OS version
+        - Disk usage on /
+        - At least three currently running services
+
+success_criteria:
+  - OS and kernel identified
+  - Resource health checked (CPU, memory, disk)
+  - Running services and listening ports listed
+  - /tmp/server-summary.txt written with required sections
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      Five questions, answered in two minutes:
+        Who am I?        whoami, id
+        Where am I?      hostname, uname -a
+        What OS is this? cat /etc/os-release
+        How loaded?      uptime, free -h, df -h
+        What is running? systemctl list-units --type=service --state=running
+
+  - level: 2
+    text: |
+      Identity:
+        whoami && hostname && uname -r
+        grep PRETTY_NAME /etc/os-release
+
+      Resources:
+        nproc && uptime
+        free -h
+        df -h /
+
+      Services and ports:
+        systemctl list-units --type=service --state=running --no-legend
+        ss -tlnp | grep LISTEN
+
+      Write the summary:
+        {
+          echo "HOSTNAME: $(hostname)"
+          echo "OS: $(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '\"')"
+          echo "KERNEL: $(uname -r)"
+          echo "--- DISK ---"
+          df -h /
+          echo "--- SERVICES ---"
+          systemctl list-units --type=service --state=running --no-legend
+        } > /tmp/server-summary.txt
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        whoami && id
+        hostname && uname -r
+        grep PRETTY_NAME /etc/os-release
+
+        nproc
+        uptime                        # load avg above nproc = saturated
+        free -h                       # Avail < 200M = memory pressure
+        df -h /                       # Use% > 80% = disk risk
+
+        systemctl list-units --type=service --state=running --no-legend | head -20
+        ss -tlnp | grep LISTEN
+
+        {
+          echo "HOSTNAME: $(hostname)"
+          echo "DATE: $(date)"
+          echo "OS: $(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '\"')"
+          echo "KERNEL: $(uname -r)"
+          echo "CPUS: $(nproc)"
+          echo "--- DISK ---"
+          df -h /
+          echo "--- SERVICES ---"
+          systemctl list-units --type=service --state=running --no-legend
+          echo "--- LISTENING PORTS ---"
+          ss -tlnp | grep LISTEN
+        } > /tmp/server-summary.txt
+
+        wc -l /tmp/server-summary.txt   # expect 10+
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: os-identified
+      name: OS and Kernel Identified
+      type: ssh
+      cmd: uname -r | grep -qE '^[0-9]+\.'
+      failure_hint: Run uname -a and cat /etc/os-release
+
+    - id: services-listed
+      name: Running Services Listed
+      type: ssh
+      cmd: test $(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | wc -l) -gt 0
+      failure_hint: Run systemctl list-units --type=service --state=running
+
+    - id: summary-written
+      name: /tmp/server-summary.txt Written
+      type: ssh
+      cmd: test -s /tmp/server-summary.txt && test $(wc -l < /tmp/server-summary.txt) -ge 5
+      failure_hint: Write hostname, disk usage, and running services to /tmp/server-summary.txt
+
+completion_message: |
+  Establishing facts before touching a system prevents modifying the wrong server
+  and chasing the wrong bottleneck during incidents.
+  This five-minute baseline is the foundation of every incident response runbook.

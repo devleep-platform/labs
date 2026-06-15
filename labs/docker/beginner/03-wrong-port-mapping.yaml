@@ -1,0 +1,108 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  last_updated: 2026-06-14
+
+id: docker-wrong-port-mapping
+title: "Wrong Port Mapping"
+description: >
+  The web app container is running but unreachable.
+  Port 8080 returns connection refused. The container is healthy.
+  Something is wrong with how it was started.
+
+track: docker
+module: docker-fundamentals
+sort_order: 30
+difficulty: beginner
+engineer_level: L1
+mode: break-fix
+
+tags:
+  - docker
+  - networking
+  - ports
+  - containers
+
+estimated_minutes: 25
+timeout_minutes: 45
+
+terraform_module: labs/docker-ec2
+scenario_id: docker-wrong-port
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - docker-container-orientation
+
+briefing:
+  severity: sev-2
+  impact: Web application unreachable on expected port
+  title: Port 8080 Returns Connection Refused
+  narrative: |
+    Monitoring triggered: port 8080 on the production host is not responding.
+    The container is listed as running. The engineer who deployed it
+    is unavailable. You have the host. Make port 8080 work.
+
+objectives:
+  - Identify the actual port mapping on the running container
+  - Understand why the expected port is not reachable
+  - Fix the port mapping so the app is accessible on port 8080
+
+success_criteria:
+  - curl http://localhost:8080 returns HTTP 200
+  - A container named webserver is running and bound to host port 8080
+
+hints:
+  - level: 1
+    text: |
+      Start by finding out what port the container is actually listening on:
+        docker ps
+        docker port webserver
+
+  - level: 2
+    text: |
+      You cannot change the port mapping of a running container.
+      You must stop the current one and re-run it with the correct mapping.
+
+        docker stop webserver
+        docker rm webserver
+        docker run -d --name webserver -p 8080:80 nginx:latest
+
+  - level: 3
+    text: |
+      Full fix:
+        docker stop webserver && docker rm webserver
+        docker run -d \
+          --name webserver \
+          --restart unless-stopped \
+          -p 8080:80 \
+          nginx:latest
+
+        curl http://localhost:8080   # should return 200
+
+validation:
+  strategy: all
+  default_timeout_seconds: 10
+  checks:
+    - id: port-8080-responds
+      name: Port 8080 Returns HTTP 200
+      type: ssh
+      cmd: curl -sf http://localhost:8080 > /dev/null
+      failure_hint: Make sure a container is running with -p 8080:80
+
+    - id: correct-container
+      name: Container Named webserver Is Running on Port 8080
+      type: ssh
+      cmd: docker inspect webserver --format '{{json .HostConfig.PortBindings}}' | grep -q '"8080"'
+      failure_hint: Re-run the container with --name webserver -p 8080:80
+
+completion_message: |
+  Port mapping mistakes are one of the most common Docker deployment errors.
+  You cannot patch a running container's port — stop, remove, re-run.
+  In production this is why you use orchestration: it handles port conflicts for you.

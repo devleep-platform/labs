@@ -1,0 +1,207 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-performance-analysis
+title: "Performance Analysis: Diagnose and Contain a Runaway Process"
+description: >
+  A server is under abnormal load. CPU is pegged, memory pressure is building,
+  and the application is slow. Identify what is consuming resources, understand
+  why it started, and contain it without taking down healthy services.
+
+track: linux
+module: linux-troubleshooting
+sort_order: 140
+difficulty: intermediate
+engineer_level: L2
+mode: incident
+
+tags:
+  - linux
+  - performance
+  - cpu
+  - memory
+  - top
+  - htop
+  - ps
+  - troubleshooting
+  - incident
+
+estimated_minutes: 45
+timeout_minutes: 90
+
+terraform_module: labs/linux-ec2
+scenario_id: high-cpu
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-process-control
+  - linux-systemd-mastery
+
+briefing:
+  severity: sev-2
+  impact: Application degraded — elevated response times, customer complaints
+  title: Performance Incident
+  narrative: |
+    Monitoring shows CPU sustained above 90% for the past 12 minutes.
+    Memory available has dropped from 1.2GB to under 150MB.
+    The application is responding but slowly. No deploy happened.
+    The on-call engineer checked and said "something is consuming everything"
+    before going offline. You are taking over.
+  incident:
+    detected_at: "2026-02-03T09:14:00Z"
+    severity: sev-2
+    impacted_services: [web, api]
+
+evidence:
+  - type: pagerduty
+    title: "P2: prod-app-01 CPU 94% sustained 12m"
+    content: |
+      Alert: CPU usage > 90% for > 10 minutes
+      Host: prod-app-01
+      CPU: 94.2% (1-min avg)
+      Memory available: 143MB
+      Load average: 7.82 / 7.64 / 6.91
+      Triggered: 09:14 UTC
+  - type: slack
+    title: "#incidents"
+    content: |
+      @on-call I looked at top — there's something eating all the CPU
+      but I don't recognize the process. Handing off.
+
+objectives:
+  - Identify the resource-consuming process by CPU, memory, and I/O
+  - Understand what the process is and whether it is legitimate
+  - Contain the problem without killing healthy application processes
+  - Document what happened and prevent recurrence
+
+deliverables:
+  - path: /tmp/diagnosis.txt
+    description: |
+      Diagnosis containing:
+        - Which process is consuming resources (name, PID, user)
+        - How long it has been running (ps -o etime)
+        - Why it started (cron? manual? service dependency?)
+  - path: /tmp/remediation.txt
+    description: |
+      Remediation steps taken:
+        - What you killed or contained and why
+        - Current CPU and memory state after fix
+        - How to prevent recurrence
+
+success_criteria:
+  - Runaway process identified and documented in /tmp/diagnosis.txt
+  - CPU load below 2.0 after remediation
+  - /tmp/remediation.txt documents the fix and prevention
+  - No healthy application processes terminated
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      Before you kill anything, understand what you are looking at.
+
+      What is consuming CPU? What is consuming memory?
+      Are they the same process or different ones?
+      Is the process a known service, a cron job, or something unexpected?
+      How long has it been running?
+
+  - level: 2
+    text: |
+      Tools for resource investigation:
+        ps aux --sort=-%cpu | head -15
+        ps aux --sort=-%mem | head -15
+        top -b -n1 | head -30
+        ps -p PID -o pid,ppid,user,etime,cmd
+        lsof -p PID | head -20          (what files does it have open?)
+        cat /proc/PID/cmdline | tr '\0' ' '   (full command line)
+
+      For I/O:
+        iotop -b -n1 2>/dev/null || iostat 1 3
+
+      Understand before containment:
+        Is this process a child of a cron job? (check PPID)
+        Is it a runaway loop? (check CPU time vs wall time)
+
+  - level: 3
+    text: |
+      Investigation sequence:
+
+        # 1. Get a snapshot
+        ps aux --sort=-%cpu | head -15
+        top -b -n1 | head -20
+
+        # 2. Identify the top consumer
+        PID=$(ps aux --sort=-%cpu | awk 'NR==2{print $2}')
+        ps -p "$PID" -o pid,ppid,user,etime,%cpu,%mem,cmd
+
+        # 3. Understand its origin
+        cat /proc/"$PID"/cmdline | tr '\0' ' '
+        ls -la /proc/"$PID"/exe 2>/dev/null
+        # Check if it came from cron:
+        ps -p $(ps -p "$PID" -o ppid= | tr -d ' ') -o cmd=
+
+        # 4. Document before touching anything
+        ps -p "$PID" -o pid,ppid,user,etime,%cpu,%mem,cmd > /tmp/diagnosis.txt
+
+        # 5. Contain — SIGTERM first, SIGKILL only if needed
+        kill "$PID"
+        sleep 3
+        ps -p "$PID" 2>/dev/null && kill -9 "$PID" || echo "Process exited cleanly"
+
+        # 6. Verify recovery
+        uptime
+        free -h
+
+        # 7. Prevent recurrence
+        # If it was a cron job: disable or fix the script
+        # If it was a runaway service: add resource limits in the systemd unit
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: diagnosis-written
+      name: Diagnosis Documented
+      type: ssh
+      cmd: test -s /tmp/diagnosis.txt && test $(wc -l < /tmp/diagnosis.txt) -ge 3
+      failure_hint: Document the runaway process (name, PID, user, runtime) in /tmp/diagnosis.txt before fixing
+
+    - id: cpu-load-reduced
+      name: CPU Load Normalized
+      type: ssh
+      cmd: |
+        LOAD=$(uptime | awk -F'load average:' '{print $2}' | awk -F'[,.]' '{print $1}' | tr -d ' ')
+        test "${LOAD:-99}" -lt 2
+      failure_hint: CPU load is still elevated. Find and stop the process consuming CPU.
+
+    - id: memory-recovered
+      name: Memory Pressure Relieved
+      type: ssh
+      cmd: free -m | awk 'NR==2{if ($7>200) exit 0; exit 1}'
+      failure_hint: Available memory is still critically low. The process may still be running.
+
+    - id: remediation-written
+      name: Remediation Documented
+      type: ssh
+      cmd: test -s /tmp/remediation.txt && test $(wc -l < /tmp/remediation.txt) -ge 5
+      failure_hint: Document what you killed, why, and how to prevent it in /tmp/remediation.txt
+
+completion_message: |
+  The instinct to kill -9 the top CPU consumer immediately is dangerous.
+  A database process consuming CPU during a query should not be killed.
+  A runaway shell script should. The difference is in the diagnosis.
+  Understand what the process is, why it started, and what killing it breaks
+  before you touch it. ps -o etime shows how long it has been running.
+  A process that has run for 0:03 and is at 100% CPU is probably not a database.

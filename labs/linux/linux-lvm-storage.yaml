@@ -1,0 +1,245 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-lvm-storage
+title: "LVM: Extend a Full Logical Volume Online Without Downtime"
+description: >
+  A logical volume holding application data is 100% full. The application has
+  stopped writing. You have unallocated space in the volume group.
+  Extend the LV and filesystem online — no unmount required — and document the
+  procedure so it can be repeated without a runbook search next time.
+
+track: linux
+module: linux-troubleshooting
+sort_order: 180
+difficulty: advanced
+engineer_level: L3
+mode: incident
+
+tags:
+  - linux
+  - lvm
+  - storage
+  - filesystem
+  - ext4
+  - xfs
+  - resize
+  - incident
+  - troubleshooting
+
+estimated_minutes: 50
+timeout_minutes: 100
+
+terraform_module: labs/linux-ec2
+scenario_id: lvm-challenge
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+    - ebs
+
+prerequisites:
+  - linux-storage-management
+
+briefing:
+  severity: sev-2
+  impact: Application writes failing — data ingestion stopped
+  title: Storage Volume Full — Write Errors
+  narrative: |
+    Writes to /data/app have been failing for 11 minutes with "No space left on device."
+    df shows /data/app at 100%. Disk I/O errors are appearing in /var/log/messages.
+    The underlying LVM volume group has unallocated space — this can be fixed online
+    without any downtime. The application will recover automatically once writes succeed.
+    Previous on-call said "I don't touch LVM" and escalated. You own this.
+  incident:
+    detected_at: "2026-03-01T04:22:00Z"
+    severity: sev-2
+    impacted_services: [ingest, database, monitoring]
+
+evidence:
+  - type: pagerduty
+    title: "P2: prod-app-01 /data/app 100% — write errors"
+    content: |
+      Alert: Filesystem /data/app at 100% capacity
+      Errors: "No space left on device" in application log
+      Duration: 11 minutes
+      Write queue: backing up
+  - type: note
+    title: Known state from previous on-call
+    content: |
+      Checked df — yes, 100%.
+      pvs shows the VG has ~10GB free.
+      I'm not familiar enough with LVM to proceed safely. Escalating.
+  - type: log
+    title: /var/log/messages excerpt
+    content: |
+      Mar 01 04:22:14 prod-app-01 kernel: EXT4-fs error (device dm-2): ...
+      Mar 01 04:22:14 prod-app-01 kernel: ext4_find_entry: Directory index
+        failure: inode#2, block 0, name: app.db
+
+objectives:
+  - Identify the full LV and confirm free space is available in the VG
+  - Extend the logical volume using available VG free space
+  - Resize the filesystem online (no unmount)
+  - Verify application writes succeed after the extension
+  - Document the LVM state before and after
+
+deliverables:
+  - path: /tmp/lvm-before.txt
+    description: |
+      LVM state before the fix:
+        - pvs output (physical volumes)
+        - vgs output (volume groups and free space)
+        - lvs output (logical volumes and sizes)
+        - df -h /data/app
+  - path: /tmp/lvm-after.txt
+    description: |
+      LVM state after the fix:
+        - lvs output showing new size
+        - df -h /data/app showing recovered space
+        - write test confirming /data/app is writable
+
+success_criteria:
+  - /data/app filesystem usage below 80% after extension
+  - LV size increased by at least 5GB
+  - Filesystem resize completed without unmounting
+  - /data/app is writable (write test passes)
+  - /tmp/lvm-before.txt and /tmp/lvm-after.txt both written
+
+hint_policy: available_with_penalty
+hints:
+  - level: 1
+    text: |
+      Before touching anything, understand the LVM stack:
+        - Physical Volume (PV) — actual disk or partition
+        - Volume Group (VG) — pool of PV space
+        - Logical Volume (LV) — what you mount; carved from the VG
+
+      The sequence is always: extend LV → resize filesystem.
+      Never the other way around.
+
+      Two things can limit how much you can extend:
+        1. Free space in the VG (vgs shows this)
+        2. Whether the filesystem supports online resize (ext4 and XFS do; XFS is grow-only)
+
+  - level: 2
+    text: |
+      Inspect the LVM stack:
+        sudo pvs                             # physical volumes
+        sudo vgs                             # volume groups and free space
+        sudo lvs                             # logical volumes
+        sudo lvdisplay /dev/VG_NAME/LV_NAME  # full LV details
+        df -h /data/app                      # current filesystem usage
+
+      Identify the LV backing /data/app:
+        df /data/app                         # shows device, e.g. /dev/mapper/vg_data-lv_app
+        sudo lvs --units g                   # all LVs with sizes
+
+      Extend and resize:
+        sudo lvextend -L +5G /dev/VG_NAME/LV_NAME   # add 5GB to LV
+        # OR: use all free space
+        sudo lvextend -l +100%FREE /dev/VG_NAME/LV_NAME
+
+        # Resize filesystem (ext4):
+        sudo resize2fs /dev/VG_NAME/LV_NAME
+
+        # Resize filesystem (XFS — note: requires the FS to be mounted):
+        sudo xfs_growfs /data/app
+
+      Verify:
+        df -h /data/app
+        touch /data/app/write-test && echo "writable" && rm /data/app/write-test
+
+  - level: 3
+    text: |
+      Full procedure:
+
+        # 1. Document before state
+        {
+          echo "=== PVS ===" && sudo pvs
+          echo "=== VGS ===" && sudo vgs
+          echo "=== LVS ===" && sudo lvs
+          echo "=== DF ===" && df -h /data/app
+        } | sudo tee /tmp/lvm-before.txt
+
+        # 2. Identify the LV device
+        LV_DEV=$(df /data/app | awk 'NR==2{print $1}')
+        echo "LV device: $LV_DEV"
+
+        # 3. Find the VG and LV names
+        sudo lvdisplay "$LV_DEV" | grep -E "VG Name|LV Name|LV Size"
+
+        # 4. Extend the LV — use all available VG free space
+        VG_NAME=$(sudo lvdisplay "$LV_DEV" | awk '/VG Name/{print $3}')
+        LV_PATH=$(sudo lvdisplay "$LV_DEV" | awk '/LV Path/{print $3}')
+        sudo lvextend -l +100%FREE "$LV_PATH"
+
+        # 5. Resize the filesystem (detect type)
+        FS_TYPE=$(blkid "$LV_DEV" -s TYPE -o value)
+        if [ "$FS_TYPE" = "xfs" ]; then
+          sudo xfs_growfs /data/app      # XFS: pass the mount point
+        else
+          sudo resize2fs "$LV_DEV"       # ext4: pass the device
+        fi
+
+        # 6. Verify
+        df -h /data/app
+        sudo touch /data/app/write-test && echo "write ok" && sudo rm /data/app/write-test
+
+        # 7. Document after state
+        {
+          echo "=== LVS AFTER ===" && sudo lvs
+          echo "=== DF AFTER ===" && df -h /data/app
+          echo "=== WRITE TEST ===" && sudo touch /data/app/write-test && echo "writable" && sudo rm /data/app/write-test
+        } | sudo tee /tmp/lvm-after.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: before-documented
+      name: Pre-Fix State Documented
+      type: ssh
+      cmd: test -s /tmp/lvm-before.txt && grep -qi "vgs\|vg\|pv\|lv" /tmp/lvm-before.txt
+      failure_hint: Run pvs, vgs, lvs, and df -h /data/app before touching anything and write to /tmp/lvm-before.txt
+
+    - id: filesystem-extended
+      name: /data/app Has Free Space
+      type: ssh
+      cmd: df /data/app | awk 'NR==2{gsub("%","",$5); if ($5<80) exit 0; exit 1}'
+      failure_hint: "Extend the LV (lvextend) and resize the filesystem (resize2fs or xfs_growfs)"
+
+    - id: data-writable
+      name: /data/app Is Writable
+      type: ssh
+      cmd: sudo touch /data/app/validation-test 2>/dev/null && sudo rm /data/app/validation-test
+      failure_hint: Write to /data/app to confirm the filesystem accepts new writes after extension
+
+    - id: lv-size-increased
+      name: LV Size Increased
+      type: ssh
+      cmd: sudo lvs --units g --noheadings $(df /data/app | awk 'NR==2{print $1}') 2>/dev/null | awk '{gsub("g","",$4); if ($4>5) exit 0; exit 1}'
+      failure_hint: "The LV should be at least 6GB after extension"
+
+    - id: after-documented
+      name: Post-Fix State Documented
+      type: ssh
+      cmd: test -s /tmp/lvm-after.txt && grep -qi "df\|after\|writ" /tmp/lvm-after.txt
+      failure_hint: Write lvs and df -h /data/app output after the fix to /tmp/lvm-after.txt
+
+completion_message: |
+  LVM exists precisely so that "disk full" is not a crisis.
+  The three-layer abstraction (PV → VG → LV) means you can add disks to the pool
+  and extend any LV without ever unmounting a filesystem.
+  ext4 and XFS both support online resize.
+  The procedure takes under two minutes once you know the commands.
+  The reason engineers fear LVM is that they never practice it until the incident.

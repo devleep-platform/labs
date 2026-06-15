@@ -1,0 +1,236 @@
+schema_version: 1
+
+metadata:
+  version: 1.0.0
+  author: devleep-core
+  reviewed_by:
+    - linux-sme
+    - security-sme
+  last_updated: 2026-06-13
+
+id: linux-ssh-mastery
+title: "SSH Hardening: Disable Passwords, Configure Keys, Lock Down the Daemon"
+description: >
+  The server currently allows password authentication and root login over SSH.
+  Harden it: set up key-based auth for a new user, disable password auth,
+  disable root login, and add a legal banner — without locking yourself out.
+
+track: linux
+module: linux-administration
+sort_order: 190
+difficulty: intermediate
+engineer_level: L2
+mode: guided
+
+tags:
+  - linux
+  - ssh
+  - sshd
+  - security
+  - hardening
+  - keys
+  - administration
+
+estimated_minutes: 50
+timeout_minutes: 100
+
+terraform_module: labs/linux-ec2
+scenario_id: hello-linux
+
+environment:
+  instance_type: t3.micro
+  estimated_cost: "$0.01"
+  aws_services:
+    - ec2
+
+prerequisites:
+  - linux-users-and-access
+
+briefing:
+  severity: sev-4
+  impact: No production impact — hardening task
+  title: SSH Security Hardening Required
+  narrative: |
+    A security scan flagged this server for allowing password-based SSH authentication.
+    Brute-force attempts against the SSH port have been running for 18 hours.
+    The team wants password auth disabled, a dedicated service account for deployments
+    with key-based auth only, and a login banner for legal coverage.
+    The constraint: you cannot lock yourself out during the change.
+
+evidence:
+  - type: note
+    title: "Security scan finding SEC-0042"
+    content: |
+      Finding: SSH password authentication enabled
+      Risk: HIGH — server exposed to internet on port 22
+      Remediation:
+        1. Create deploy user with authorized key
+        2. Set PasswordAuthentication no in sshd_config
+        3. Set PermitRootLogin no
+        4. Add LoginGraceTime and MaxAuthTries limits
+        5. Add /etc/ssh/banner for legal notice
+
+objectives:
+  - Generate an SSH key pair and configure authorized_keys correctly
+  - Harden sshd_config incrementally — test before disabling password auth
+  - Configure SSH daemon options that reduce brute-force exposure
+  - Add a pre-auth banner and verify it appears on connection
+
+deliverables:
+  - path: /etc/ssh/banner
+    description: Legal/warning banner shown before login prompt
+  - path: /tmp/ssh-audit.txt
+    description: |
+      Audit report containing:
+        - Relevant sshd_config settings (grep out comments)
+        - sshd -T output for PasswordAuthentication and PermitRootLogin
+        - Proof the banner appears on connection attempt
+
+success_criteria:
+  - deploy user created with ~/.ssh/authorized_keys configured
+  - PasswordAuthentication no set in sshd_config
+  - PermitRootLogin no set in sshd_config
+  - /etc/ssh/banner exists and is referenced in sshd_config
+  - sshd config validates without errors
+  - /tmp/ssh-audit.txt documents the hardening
+
+hint_policy: show_level_1_automatically
+hints:
+  - level: 1
+    text: |
+      The critical ordering rule: set up key auth and verify it works
+      BEFORE disabling password auth. Doing it in the wrong order locks you out.
+
+      Key setup: generate key → copy public key to ~/.ssh/authorized_keys (mode 600)
+      sshd_config changes: edit → sshd -t (test) → systemctl reload sshd (not restart)
+      sshd -T prints the effective configuration (merged defaults + overrides).
+
+  - level: 2
+    text: |
+      Create deploy user and set up key auth:
+        sudo useradd -m -s /bin/bash deploy
+        ssh-keygen -t ed25519 -f /tmp/deploy_key -N ""
+        sudo mkdir -p /home/deploy/.ssh
+        sudo cp /tmp/deploy_key.pub /home/deploy/.ssh/authorized_keys
+        sudo chown -R deploy:deploy /home/deploy/.ssh
+        sudo chmod 700 /home/deploy/.ssh
+        sudo chmod 600 /home/deploy/.ssh/authorized_keys
+
+      Harden sshd_config (edit /etc/ssh/sshd_config):
+        PermitRootLogin no
+        PasswordAuthentication no
+        MaxAuthTries 3
+        LoginGraceTime 20
+        Banner /etc/ssh/banner
+
+      Add banner:
+        sudo tee /etc/ssh/banner << 'EOF'
+        WARNING: Authorized access only. All activity is monitored and logged.
+        EOF
+
+      Test then reload:
+        sudo sshd -t              # test config — must show no errors
+        sudo systemctl reload sshd
+
+  - level: 3
+    text: |
+      Full sequence:
+
+        # Step 1: create deploy user
+        sudo useradd -m -s /bin/bash deploy
+
+        # Step 2: generate key pair (ed25519 is faster and more secure than RSA 2048)
+        ssh-keygen -t ed25519 -f /tmp/deploy_key -N "" -C "deploy@$(hostname)"
+        # /tmp/deploy_key = private key (keep secret)
+        # /tmp/deploy_key.pub = public key (goes in authorized_keys)
+
+        # Step 3: configure authorized_keys
+        sudo mkdir -p /home/deploy/.ssh
+        sudo cp /tmp/deploy_key.pub /home/deploy/.ssh/authorized_keys
+        sudo chown -R deploy:deploy /home/deploy/.ssh
+        sudo chmod 700 /home/deploy/.ssh     # directory: only owner can list
+        sudo chmod 600 /home/deploy/.ssh/authorized_keys  # file: only owner can read
+
+        # Step 4: add banner
+        sudo tee /etc/ssh/banner << 'EOF'
+        WARNING: Authorized access only.
+        Unauthorized access is prohibited and will be prosecuted.
+        All sessions are monitored and logged.
+        EOF
+
+        # Step 5: harden sshd_config
+        sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+        sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+        sudo sed -i 's/^#\?MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
+        sudo sed -i 's/^#\?LoginGraceTime.*/LoginGraceTime 20/' /etc/ssh/sshd_config
+        sudo bash -c 'grep -q "^Banner" /etc/ssh/sshd_config \
+          || echo "Banner /etc/ssh/banner" >> /etc/ssh/sshd_config'
+
+        # Step 6: ALWAYS test before reloading
+        sudo sshd -t
+        # If this fails, fix the config before proceeding
+
+        # Step 7: reload (not restart — keeps existing sessions alive)
+        sudo systemctl reload sshd
+
+        # Step 8: verify effective config
+        sudo sshd -T | grep -E "passwordauthentication|permitrootlogin|banner|maxauthtries"
+
+        # Audit
+        {
+          echo "=== EFFECTIVE SSHD CONFIG ==="
+          sudo sshd -T | grep -E "passwordauthentication|permitrootlogin|banner|maxauthtries|logingracetime"
+          echo ""
+          echo "=== BANNER CONTENT ==="
+          cat /etc/ssh/banner
+          echo ""
+          echo "=== AUTHORIZED KEYS ==="
+          sudo cat /home/deploy/.ssh/authorized_keys | cut -c1-60
+        } > /tmp/ssh-audit.txt
+
+validation:
+  strategy: all
+  default_timeout_seconds: 5
+  checks:
+    - id: deploy-user-has-key
+      name: deploy User Has authorized_keys
+      type: ssh
+      cmd: sudo test -s /home/deploy/.ssh/authorized_keys
+      failure_hint: "Set up key auth for deploy user before disabling password auth"
+
+    - id: password-auth-disabled
+      name: Password Authentication Disabled
+      type: ssh
+      cmd: sudo sshd -T 2>/dev/null | grep -q "^passwordauthentication no"
+      failure_hint: "Set PasswordAuthentication no in /etc/ssh/sshd_config then sudo sshd -t && sudo systemctl reload sshd"
+
+    - id: root-login-disabled
+      name: Root Login Disabled
+      type: ssh
+      cmd: sudo sshd -T 2>/dev/null | grep -q "^permitrootlogin no"
+      failure_hint: "Set PermitRootLogin no in /etc/ssh/sshd_config"
+
+    - id: banner-configured
+      name: Login Banner Configured
+      type: ssh
+      cmd: sudo sshd -T 2>/dev/null | grep "^banner" | grep -qv "none"
+      failure_hint: "Create /etc/ssh/banner and add Banner /etc/ssh/banner to sshd_config"
+
+    - id: sshd-config-valid
+      name: sshd Config Validates
+      type: ssh
+      cmd: sudo sshd -t 2>/dev/null
+      failure_hint: "Run: sudo sshd -t to check config. Fix all errors before reloading."
+
+    - id: audit-written
+      name: SSH Audit Written
+      type: ssh
+      cmd: test -s /tmp/ssh-audit.txt
+      failure_hint: "Write sshd -T output and banner content to /tmp/ssh-audit.txt"
+
+completion_message: |
+  The ordering rule here is universal: set up the replacement auth method and
+  verify it works before removing the existing one. This applies to SSH keys,
+  MFA, certificate auth, and every other auth migration.
+  sshd -T shows the effective runtime config — not what the file says, but what
+  the daemon actually uses after merging defaults. Always use sshd -T to verify.
